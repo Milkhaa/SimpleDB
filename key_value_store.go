@@ -1,13 +1,17 @@
 package simpledb
 
+import (
+	"bytes"
+)
+
 type KeyValueStore struct {
 	//to start with,we will convert all data type to []byte
-	// and store that as string type key or value
-	mem map[string]string
+	// and store that as string type key or bytes value
+	mem map[string][]byte
 }
 
 func (kv *KeyValueStore) Open() error {
-	kv.mem = make(map[string]string, 0)
+	kv.mem = make(map[string][]byte, 0)
 	return nil
 }
 
@@ -18,18 +22,19 @@ func (kv *KeyValueStore) Close() error {
 
 func (kv *KeyValueStore) Set(key []byte, value []byte) (updated bool, err error) {
 	v, ok := kv.mem[string(key)]
-	if ok && v == string(value) {
+	if ok && bytes.Equal(v, value) {
+
 		return false, nil
 	}
 
-	// convert bytes to string before storing
-	kv.mem[string(key)] = string(value)
+	// convert key bytes to string
+	kv.mem[string(key)] = value
 	return true, nil
 }
 
 func (kv *KeyValueStore) Get(key []byte) (value []byte, ok bool, err error) {
 	v, ok := kv.mem[string(key)]
-	return []byte(v), ok, nil
+	return v, ok, nil
 }
 
 func (kv *KeyValueStore) Del(key []byte) (updated bool, err error) {
@@ -41,5 +46,3 @@ func (kv *KeyValueStore) Del(key []byte) (updated bool, err error) {
 	delete(kv.mem, string(key))
 	return true, nil
 }
-
-//JaiShreeRam
