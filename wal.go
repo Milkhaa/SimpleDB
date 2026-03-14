@@ -1,168 +1,80 @@
 package simpledb
 
 import (
-	"encoding/binary"
-	"errors"
-	"hash/crc32"
 	"io"
 	"os"
 	"path"
 	"syscall"
 )
 
-type WAL struct {
-	FileName    string
-	filePointer *os.File
+// wal is an append-only write-ahead log. Each record is checksummed for atomicity;
+// on replay, incomplete or corrupted records are skipped (see record.decode).
+type wal struct {
+	path string
+	file *os.File
 }
 
-// Data serialization before writing to disk
-type WalEntry struct {
-	key     []byte
-	val     []byte
-	deleted bool
-}
-
-func (entry *WalEntry) Encode() ([]byte, error) {
-	/*
-		Binary Encoding
-
-		Format:
-			1. First 4 bytes: CheckSum bytes
-			2. First 4 bytes: length of key bytes,integer - little endian format
-			3. Next 4 bytes : length of value bytes, integer - little endian format
-			4. Next 1 byte  : to denote whether this is a DEL operation
-			5. Next         : key bytes
-			6. Next         : value bytes
-	*/
-	encodedBytes := make([]byte, 4+4+4+1)
-	binary.LittleEndian.PutUint32(encodedBytes[4:8], uint32(len(entry.key))) //#2
-
-	encodedBytes = append(encodedBytes, entry.key...) //#5
-	if entry.deleted {
-		encodedBytes[12] = 1 //#4
-
-	} else {
-		binary.LittleEndian.PutUint32(encodedBytes[8:12], uint32(len(entry.val))) //#3
-		encodedBytes = append(encodedBytes, entry.val...)                         //#6
-	}
-
-	/*
-		ATOMICITY:
-			When appending a record to the log, we want it to either be completely
-			written or not written at all. This can be called atomicity
-
-			Incomplete writes can be detected using checksum, and discarded - at the time of decode.
-
-	*/
-
-	//generate checksum
-	checksum := crc32.ChecksumIEEE(encodedBytes[4:])
-	binary.LittleEndian.PutUint32(encodedBytes[0:4], checksum) // #1
-
-	return encodedBytes, nil
-
-}
-
-var ErrBadSum = errors.New("bad checksum")
-
-func (ent *WalEntry) Decode(r io.Reader) error {
-	var header [13]byte
-	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return err
-	}
-
-	klen := int(binary.LittleEndian.Uint32(header[4:8]))
-	vlen := int(binary.LittleEndian.Uint32(header[8:12]))
-	deleted := header[12]
-
-	data := make([]byte, klen+vlen)
-	if _, err := io.ReadFull(r, data); err != nil {
-		return err
-	}
-
-	//calculate and match checksum
-	checksum := binary.LittleEndian.Uint32(header[0:4])
-
-	calcChecksum := crc32.ChecksumIEEE(append(header[4:], data...))
-	if calcChecksum != checksum {
-		return ErrBadSum
-	}
-
-	ent.key = data[:klen]
-	if deleted != 0 {
-		ent.deleted = true
-	} else {
-		ent.deleted = false
-		ent.val = data[klen:]
-	}
-
-	return nil
-
-}
-
-// Operations available on disk
-
-func (wal *WAL) Open() error {
+// open creates or opens the WAL file at path and syncs the containing directory
+// so the file is durable (on Unix, directory fsync is required for file creation).
+func (w *wal) open(path string) error {
 	var err error
-	wal.filePointer, err = os.OpenFile(wal.FileName, os.O_RDWR|os.O_CREATE, 0o644)
+	w.path = path
+	w.file, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return err
 	}
-
-	if err = syncDir(path.Base(wal.FileName)); err != nil {
-		_ = wal.filePointer.Close()
+	// Ensure directory entry is durable (Unix: file data alone is not enough).
+	if err := syncDir(path); err != nil {
+		_ = w.file.Close()
 		return err
 	}
-
 	return nil
 }
 
-/*
-DURABILITY
+func (w *wal) close() error {
+	if w.file == nil {
+		return nil
+	}
+	err := w.file.Close()
+	w.file = nil
+	return err
+}
 
-	On Linux, fsync ensures file data is written, but does not ensure the file itself exists.
-	This is because a file is recorded by its parent directory. Hence Directory sync is required.
-*/
-func syncDir(file string) error {
-	flags := os.O_RDONLY | syscall.O_DIRECTORY
-	dirfd, err := syscall.Open(path.Dir(file), flags, 0o644)
+// append encodes rec and appends it to the log, then syncs for durability.
+func (w *wal) append(rec *record) error {
+	data, err := rec.encode()
 	if err != nil {
 		return err
 	}
-	defer syscall.Close(dirfd)
-	return syscall.Fsync(dirfd)
-}
-
-func (wal *WAL) Close() error {
-	return wal.filePointer.Close()
-}
-
-func (wal *WAL) Write(entry *WalEntry) error {
-	encodedBytes, err := entry.Encode()
-	if err != nil {
+	if _, err := w.file.Write(data); err != nil {
 		return err
 	}
-
-	if _, err = wal.filePointer.Write(encodedBytes); err != nil {
-		return err
-	}
-
-	/*
-		DURABILITY:
-		This fSync + Directory sync ensures durability of every WAL write
-
-
-	*/
-	return wal.filePointer.Sync()
+	return w.file.Sync()
 }
 
-func (wal *WAL) Read(entry *WalEntry) (bool, error) {
-	err := entry.Decode(wal.filePointer)
-	if err == io.EOF || err == io.ErrUnexpectedEOF || err == ErrBadSum {
+// read decodes the next record from the log into rec.
+// Returns (true, nil) when no more records (EOF, truncated, or bad checksum).
+func (w *wal) read(rec *record) (done bool, err error) {
+	err = rec.decode(w.file)
+	if err == io.EOF || err == io.ErrUnexpectedEOF || err == ErrBadChecksum {
 		return true, nil
-	} else if err != nil {
-		return false, err
-	} else {
-		return false, nil
 	}
+	if err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+// syncDir fsyncs the directory containing filePath so that file creation/rename/delete
+// are durable. On Linux, fsync on the file alone does not guarantee the directory
+// entry is persisted. Unix-specific; Windows does not require this.
+func syncDir(filePath string) error {
+	dir := path.Dir(filePath)
+	flags := os.O_RDONLY | syscall.O_DIRECTORY
+	fd, err := syscall.Open(dir, flags, 0)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(fd)
+	return syscall.Fsync(fd)
 }
