@@ -23,14 +23,20 @@ func TestRowEncode(t *testing.T) {
 		Cell{Type: CellTypeStr, Str: []byte("button_a")},
 	}
 	// key: "event\0" + I64(1000) LE + len("click") LE + "click"
-	key := []byte{'e', 'v', 'e', 'n', 't', 0, 0xe8, 0x03, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 'c', 'l', 'i', 'c', 'k'}
+	expectKey := []byte{'e', 'v', 'e', 'n', 't', 0, 0xe8, 0x03, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 'c', 'l', 'i', 'c', 'k'}
 	// val: len("button_a") LE + "button_a"
-	val := []byte{8, 0, 0, 0, 'b', 'u', 't', 't', 'o', 'n', '_', 'a'}
-	assert.Equal(t, key, row.EncodeKey(schema))
-	assert.Equal(t, val, row.EncodeVal(schema))
+	expectVal := []byte{8, 0, 0, 0, 'b', 'u', 't', 't', 'o', 'n', '_', 'a'}
+	var key, val []byte
+	var err error
+	key, err = row.EncodeKey(schema)
+	assert.Nil(t, err)
+	assert.Equal(t, expectKey, key)
+	val, err = row.EncodeVal(schema)
+	assert.Nil(t, err)
+	assert.Equal(t, expectVal, val)
 
 	decoded := schema.NewRow()
-	err := decoded.DecodeKey(schema, key)
+	err = decoded.DecodeKey(schema, key)
 	assert.Nil(t, err)
 	err = decoded.DecodeVal(schema, val)
 	assert.Nil(t, err)

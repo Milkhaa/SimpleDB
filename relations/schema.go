@@ -13,6 +13,16 @@ type Schema struct {
 	PKey  []int // indices into Cols
 }
 
+// Validate checks that every PKey index is in range [0, len(Cols)). Returns an error if any are invalid.
+func (s *Schema) Validate() error {
+	for _, idx := range s.PKey {
+		if idx < 0 || idx >= len(s.Cols) {
+			return ErrInvalidPKey
+		}
+	}
+	return nil
+}
+
 // NewRow returns a new Row with one Cell per column, each Cell's Type set from the schema.
 func (s *Schema) NewRow() Row {
 	row := make(Row, len(s.Cols))

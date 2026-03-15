@@ -77,6 +77,7 @@ out[1].Str = []byte("click")
 ok, _ := db.Select(schema, out)
 // ok == true, out[2].Str == []byte("button_a")
 ```
+
 ## Package
 
 This code lives in package `simpledb` under the `relations` directory and uses the root SimpleDB store (`github.com/Milkhaa/SimpleDB`) for persistence.

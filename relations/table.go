@@ -31,7 +31,10 @@ func (db *DB) Close() error {
 
 // Select loads the row by primary key into row and returns true if found.
 func (db *DB) Select(schema *Schema, row Row) (ok bool, err error) {
-	key := row.EncodeKey(schema)
+	key, err := row.EncodeKey(schema)
+	if err != nil {
+		return false, err
+	}
 	val, ok, err := db.store.Get(key)
 	if err != nil || !ok {
 		return false, err
@@ -45,8 +48,14 @@ func (db *DB) Select(schema *Schema, row Row) (ok bool, err error) {
 
 // Insert writes the row. It returns updated=true if the key was new or the value changed.
 func (db *DB) Insert(schema *Schema, row Row) (updated bool, err error) {
-	key := row.EncodeKey(schema)
-	val := row.EncodeVal(schema)
+	key, err := row.EncodeKey(schema)
+	if err != nil {
+		return false, err
+	}
+	val, err := row.EncodeVal(schema)
+	if err != nil {
+		return false, err
+	}
 	return db.store.Set(key, val)
 }
 
@@ -57,6 +66,9 @@ func (db *DB) Update(schema *Schema, row Row) (updated bool, err error) {
 
 // Delete removes the row by primary key. Returns deleted=true if the key existed.
 func (db *DB) Delete(schema *Schema, row Row) (deleted bool, err error) {
-	key := row.EncodeKey(schema)
+	key, err := row.EncodeKey(schema)
+	if err != nil {
+		return false, err
+	}
 	return db.store.Del(key)
 }

@@ -88,11 +88,11 @@ func TestTableCell(t *testing.T) {
 		assert.Equal(t, int64(2), decoded2.I64)
 	})
 
-	t.Run("Decode_short_buffer_unchanged", func(t *testing.T) {
+	t.Run("Decode_short_buffer_returns_error", func(t *testing.T) {
 		short := []byte{0, 1, 2}
 		decoded := Cell{Type: CellTypeI64}
 		rest, err := decoded.Decode(short)
-		assert.NoError(t, err)
-		assert.Equal(t, short, rest, "I64 decode with <8 bytes should return src unchanged")
+		assert.ErrorIs(t, err, ErrTruncatedData)
+		assert.Equal(t, short, rest, "rest is unchanged on truncated input")
 	})
 }
