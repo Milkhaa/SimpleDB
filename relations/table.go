@@ -6,7 +6,8 @@ import (
 
 // DB provides relational operations on top of the key-value store.
 type DB struct {
-	store *kv.Store
+	store  *kv.Store
+	tables map[string]*Schema
 }
 
 // Open opens or creates the database at path (WAL file path).
@@ -16,7 +17,26 @@ func (db *DB) Open(path string) error {
 		return err
 	}
 	db.store = s
+	if db.tables == nil {
+		db.tables = make(map[string]*Schema)
+	}
 	return nil
+}
+
+// Schema returns the registered schema for the table name, or nil.
+func (db *DB) Schema(table string) *Schema {
+	if db.tables == nil {
+		return nil
+	}
+	return db.tables[table]
+}
+
+// SetSchema registers a schema for a table (used by SQL execution).
+func (db *DB) SetSchema(schema *Schema) {
+	if db.tables == nil {
+		db.tables = make(map[string]*Schema)
+	}
+	db.tables[schema.Table] = schema
 }
 
 // Close closes the database.

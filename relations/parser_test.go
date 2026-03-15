@@ -42,9 +42,9 @@ func testParseValue(t *testing.T, s string, ref Cell) {
 }
 
 func TestParseValue(t *testing.T) {
-	testParseValue(t, " -123 ", Cell{Type: TypeI64, I64: -123})
-	testParseValue(t, ` 'abc\'\"d' `, Cell{Type: TypeStr, Str: []byte("abc'\"d")})
-	testParseValue(t, ` "abc\'\"d" `, Cell{Type: TypeStr, Str: []byte("abc'\"d")})
+	testParseValue(t, " -123 ", Cell{Type: CellTypeI64, I64: -123})
+	testParseValue(t, ` 'abc\'\"d' `, Cell{Type: CellTypeStr, Str: []byte("abc'\"d")})
+	testParseValue(t, ` "abc\'\"d" `, Cell{Type: CellTypeStr, Str: []byte("abc'\"d")})
 }
 
 func testParseStmt(t *testing.T, s string, ref interface{}) {
@@ -59,7 +59,7 @@ func TestParseStmt(t *testing.T) {
 	stmt = &stmtSelect{
 		Table: "t",
 		Cols:  []string{"a"},
-		Keys:  []sqlNamedCell{{Column: "c", Value: Cell{Type: TypeI64, I64: 1}}},
+		Keys:  []sqlNamedCell{{Column: "c", Value: Cell{Type: CellTypeI64, I64: 1}}},
 	}
 	testParseStmt(t, s, stmt)
 
@@ -68,8 +68,8 @@ func TestParseStmt(t *testing.T) {
 		Table: "T",
 		Cols:  []string{"a", "b_02"},
 		Keys: []sqlNamedCell{
-			{Column: "c", Value: Cell{Type: TypeI64, I64: 1}},
-			{Column: "d", Value: Cell{Type: TypeStr, Str: []byte("e")}},
+			{Column: "c", Value: Cell{Type: CellTypeI64, I64: 1}},
+			{Column: "d", Value: Cell{Type: CellTypeStr, Str: []byte("e")}},
 		},
 	}
 	testParseStmt(t, s, stmt)
@@ -80,7 +80,7 @@ func TestParseStmt(t *testing.T) {
 	s = "create table t (a string, b int64, primary key (b));"
 	stmt = &stmtCreatTable{
 		Table: "t",
-		Cols:  []Column{{Name: "a", Type: TypeStr}, {Name: "b", Type: TypeI64}},
+		Cols:  []Column{{Name: "a", Type: CellTypeStr}, {Name: "b", Type: CellTypeI64}},
 		Pkey:  []string{"b"},
 	}
 	testParseStmt(t, s, stmt)
@@ -88,22 +88,22 @@ func TestParseStmt(t *testing.T) {
 	s = "insert into t values (1, 'hi');"
 	stmt = &stmtInsert{
 		Table: "t",
-		Value: []Cell{{Type: TypeI64, I64: 1}, {Type: TypeStr, Str: []byte("hi")}},
+		Value: []Cell{{Type: CellTypeI64, I64: 1}, {Type: CellTypeStr, Str: []byte("hi")}},
 	}
 	testParseStmt(t, s, stmt)
 
 	s = "update t set a = 1, b = 2 where c = 3 and d = 4;"
 	stmt = &stmtUpdate{
 		Table: "t",
-		Value: []sqlNamedCell{{Column: "a", Value: Cell{Type: TypeI64, I64: 1}}, {Column: "b", Value: Cell{Type: TypeI64, I64: 2}}},
-		Keys:  []sqlNamedCell{{Column: "c", Value: Cell{Type: TypeI64, I64: 3}}, {Column: "d", Value: Cell{Type: TypeI64, I64: 4}}},
+		Value: []sqlNamedCell{{Column: "a", Value: Cell{Type: CellTypeI64, I64: 1}}, {Column: "b", Value: Cell{Type: CellTypeI64, I64: 2}}},
+		Keys:  []sqlNamedCell{{Column: "c", Value: Cell{Type: CellTypeI64, I64: 3}}, {Column: "d", Value: Cell{Type: CellTypeI64, I64: 4}}},
 	}
 	testParseStmt(t, s, stmt)
 
 	s = "delete from t where c = 3 and d = 4;"
 	stmt = &stmtDelete{
 		Table: "t",
-		Keys:  []sqlNamedCell{{Column: "c", Value: Cell{Type: TypeI64, I64: 3}}, {Column: "d", Value: Cell{Type: TypeI64, I64: 4}}},
+		Keys:  []sqlNamedCell{{Column: "c", Value: Cell{Type: CellTypeI64, I64: 3}}, {Column: "d", Value: Cell{Type: CellTypeI64, I64: 4}}},
 	}
 	testParseStmt(t, s, stmt)
 }
