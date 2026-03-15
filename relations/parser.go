@@ -144,8 +144,8 @@ type stmtSelect struct {
 	Keys  []sqlNamedCell
 }
 
-// stmtCreatTable is the parsed form of a CREATE TABLE statement.
-type stmtCreatTable struct {
+// stmtCreateTable is the parsed form of a CREATE TABLE statement.
+type stmtCreateTable struct {
 	Table string
 	Cols  []Column
 	Pkey  []string
@@ -241,7 +241,7 @@ func (p *parser) parseWhereKeys() ([]sqlNamedCell, error) {
 }
 
 // parseCreateTable parses a CREATE TABLE statement (create table name (col type, ... , primary key (pkey))).
-func (p *parser) parseCreateTable() (*stmtCreatTable, error) {
+func (p *parser) parseCreateTable() (*stmtCreateTable, error) {
 	if !p.tryKeyword("create", "table") {
 		return nil, errInvalidValue
 	}
@@ -311,7 +311,7 @@ func (p *parser) parseCreateTable() (*stmtCreatTable, error) {
 	if p.i < len(p.s) && p.s[p.i] == ')' {
 		p.i++
 	}
-	return &stmtCreatTable{Table: table, Cols: cols, Pkey: pkey}, nil
+	return &stmtCreateTable{Table: table, Cols: cols, Pkey: pkey}, nil
 }
 
 // parseInsert parses an INSERT statement (insert into table values (val, ...)).

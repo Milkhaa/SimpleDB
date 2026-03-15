@@ -78,7 +78,7 @@ func TestParseStmt(t *testing.T) {
 	testParseStmt(t, s, stmt)
 
 	s = "create table t (a string, b int64, primary key (b));"
-	stmt = &stmtCreatTable{
+	stmt = &stmtCreateTable{
 		Table: "t",
 		Cols:  []Column{{Name: "a", Type: CellTypeStr}, {Name: "b", Type: CellTypeI64}},
 		Pkey:  []string{"b"},
