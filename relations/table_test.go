@@ -102,14 +102,11 @@ func TestSQLByPKey(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, []Row{{Cell{Type: CellTypeI64, I64: 456}}}, r.Values)
 
-	// reopen (schema is in-memory only, re-register it)
+	// reopen — catalog is persisted, so no need to re-create table
 	err = db.Close()
 	assert.Nil(t, err)
 	db = DB{}
 	err = db.Open(path)
-	assert.Nil(t, err)
-	s = "create table link (time int64, src string, dst string, primary key (src, dst));"
-	_, err = db.ExecStmt(mustParseStmt(t, s))
 	assert.Nil(t, err)
 
 	s = "delete from link where src = 'bob' and dst = 'alice';"

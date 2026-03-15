@@ -1,6 +1,10 @@
 package simpledb
 
-import "fmt"
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+)
 
 // ExecResult is the result of executing a statement.
 type ExecResult struct {
@@ -27,6 +31,9 @@ func (db *DB) ExecStmt(stmt interface{}) (ExecResult, error) {
 }
 
 func (db *DB) execCreateTable(s *stmtCreatTable) (ExecResult, error) {
+	if _, err := db.GetSchema(s.Table); err == nil {
+		return ExecResult{}, errors.New("duplicate table name")
+	}
 	pkeyIdx := make([]int, 0, len(s.Pkey))
 	for _, name := range s.Pkey {
 		for i, c := range s.Cols {
@@ -44,13 +51,23 @@ func (db *DB) execCreateTable(s *stmtCreatTable) (ExecResult, error) {
 	if err := schema.Validate(); err != nil {
 		return ExecResult{}, err
 	}
-	db.SetSchema(schema)
+	data, err := json.Marshal(schema)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	if _, err = db.store.Set(schemaKey(s.Table), data); err != nil {
+		return ExecResult{}, err
+	}
+	if db.tables == nil {
+		db.tables = make(map[string]*Schema)
+	}
+	db.tables[schema.Table] = schema
 	return ExecResult{}, nil
 }
 
 func (db *DB) execInsert(s *stmtInsert) (ExecResult, error) {
-	schema := db.Schema(s.Table)
-	if schema == nil {
+	schema, err := db.GetSchema(s.Table)
+	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
 	}
 	row := make(Row, len(schema.Cols))
@@ -72,8 +89,8 @@ func (db *DB) execInsert(s *stmtInsert) (ExecResult, error) {
 }
 
 func (db *DB) execSelect(s *stmtSelect) (ExecResult, error) {
-	schema := db.Schema(s.Table)
-	if schema == nil {
+	schema, err := db.GetSchema(s.Table)
+	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
 	}
 	row := schema.NewRow()
@@ -90,8 +107,8 @@ func (db *DB) execSelect(s *stmtSelect) (ExecResult, error) {
 }
 
 func (db *DB) execUpdate(s *stmtUpdate) (ExecResult, error) {
-	schema := db.Schema(s.Table)
-	if schema == nil {
+	schema, err := db.GetSchema(s.Table)
+	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
 	}
 	row := schema.NewRow()
@@ -123,8 +140,8 @@ func (db *DB) execUpdate(s *stmtUpdate) (ExecResult, error) {
 }
 
 func (db *DB) execDelete(s *stmtDelete) (ExecResult, error) {
-	schema := db.Schema(s.Table)
-	if schema == nil {
+	schema, err := db.GetSchema(s.Table)
+	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
 	}
 	row := schema.NewRow()
