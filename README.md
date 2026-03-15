@@ -1,8 +1,63 @@
 # SimpleDB
 
-A minimal database implementation with append-only logging, durability guarantees, and checksummed records.
+A minimal database implementation with an LSM-style key-value store (write-ahead log, in-memory sorted MemTable, immutable SSTables), optional relational tables, and a small SQL parser and executor. Focuses on durability guarantees and checksummed records.
 
-**LSM mode:** Set `Config.LogThreshold > 0` and use `Config.Path` as a directory to enable an LSM-style layout: a write-ahead log, an in-memory sorted MemTable, and immutable SSTables on disk. When the MemTable size reaches `LogThreshold`, it is flushed to a new SSTable and the log is truncated. Reads merge the MemTable and all SSTables (newest wins for duplicate keys). Deletes are stored as tombstones so older levels do not resurrect keys.
+---
+
+## Project structure
+
+| Package / path      | Purpose |
+|---------------------|--------|
+| **simpledb** (root) | Key-value store: `Open(Config)`, `KV` (Get, Set, Del, Seek), WAL, metadata, merge iterator, SSTables. |
+| **simpledb/relations** | Relational layer: `DB`, `Schema`, `Row`, `Cell`; `ParseStmt` / `ExecStmt` for SQL. |
+
+- **Root** (`github.com/Milkhaa/SimpleDB`): LSM storage. `Config.Path` is a **directory**; the WAL and SSTable files live under it.
+- **Relations** (`github.com/Milkhaa/SimpleDB/relations`): Tables, primary-key CRUD, and SQL. Uses the root package for persistence.
+
+---
+
+## Usage
+
+**Key-value store (root package):**
+
+```go
+import "github.com/Milkhaa/SimpleDB"
+
+kv, err := simpledb.Open(simpledb.Config{Path: "./data"})
+if err != nil {
+    log.Fatal(err)
+}
+defer kv.Close()
+
+kv.Set([]byte("foo"), []byte("bar"))
+val, ok, _ := kv.Get([]byte("foo"))
+kv.Del([]byte("foo"))
+```
+
+**Relational + SQL (relations package):**
+
+```go
+import "github.com/Milkhaa/SimpleDB/relations"
+
+db := &relations.DB{}
+_ = db.Open("./data")  // path is a directory
+defer db.Close()
+
+stmt, _ := relations.ParseStmt("create table t (id int64, name string, primary key (id));")
+_, _ = db.ExecStmt(stmt)
+stmt, _ = relations.ParseStmt("insert into t values (1, 'hello');")
+_, _ = db.ExecStmt(stmt)
+```
+
+See **relations/README.md** for the full relational and SQL API.
+
+---
+
+## Configuration (root package)
+
+- **Config.Path** — Database directory. Default: `.simpledb`.
+- **Config.LogThreshold** — Max keys in the MemTable before flushing to an SSTable. Default: `1000`.
+- **Config.GrowthFactor** — Merge adjacent SSTables when `cur*GrowthFactor >= cur+next`. Default: `2.0`.
 
 ---
 
@@ -26,17 +81,17 @@ For binary serialization, there are implementations like Protobuf and MsgPack, b
 
 ## Durability
 
-### Append-only logs
+### Append-only log (WAL)
 
-Like text logs, a database log only appends entries at the end of the file and never modifies or deletes existing entries. Log entries record every update to the database.
+Like text logs, the database log only appends entries at the end of the file and never modifies or deletes existing entries. Log entries record every update to the key-value store.
 
-When the database starts, it reads the log and applies updates in order, producing the final state.
+On startup, the database reads the WAL and applies updates in order into the in-memory MemTable, then serves reads from the merged view of the MemTable and on-disk SSTables.
 
-**Log record layout (initial):**
+**Log record layout (with checksum for atomicity):**
 
-| key size | val size | deleted | key data | val data |
-|----------|----------|---------|----------|----------|
-| 4 bytes  | 4 bytes  | 1 byte  | ...      | ...      |
+| crc32   | key size | val size | deleted | key data | val data |
+|---------|----------|----------|---------|----------|----------|
+| 4 bytes | 4 bytes  | 4 bytes  | 1 byte  | ...      | ...      |
 
 Since data is stored on disk, we must ensure it is actually written. If we only write to a file, a power loss can cause the file to disappear or be filled with `0x00`. A database must guarantee that written data is not lost—this is **durability**. The guarantee is defined by a successful return to the caller: if the caller receives success, it can trust the write will not disappear.
 
@@ -48,19 +103,7 @@ To ensure data reaches disk, an operation must flush all cache layers and wait f
 
 On Linux, fsync ensures file *data* is written but does not ensure the file itself exists. A file is recorded by its parent directory—if a directory entry is added (file creation) but not written to disk before power loss, the file cannot be reached even if its data is on disk. To fix this, call fsync on the directory. Creating, renaming, and deleting files all require fsync on the containing directory.
 
-This is Unix-specific; Windows does not need this. The Go standard library has no method for fsyncing a directory, so you must invoke syscalls directly:
-
-```go
-func syncDir(file string) error {
-    flags := os.O_RDONLY | syscall.O_DIRECTORY
-    dirfd, err := syscall.Open(path.Dir(file), flags, 0o644)
-    if err != nil {
-        return err
-    }
-    defer syscall.Close(dirfd)
-    return syscall.Fsync(dirfd)
-}
-```
+This is Unix-specific; Windows does not need this. The Go standard library has no method for fsyncing a directory, so you must invoke syscalls directly (see `syncDir` in `wal.go`).
 
 ---
 
@@ -68,12 +111,8 @@ func syncDir(file string) error {
 
 When appending a record to the log, we want it to be either completely written or not written at all—**atomicity**. File writes do not guarantee atomicity in the case of power loss. Only the last record will be affected; previously fsynced records remain intact. This is another reason to use a log in databases.
 
-### Achieving atomicity for log/disk writes
+### Achieving atomicity for log writes
 
-If we can detect an incomplete write, we can simply ignore it. The last record affected will be the one before the last successful fsync. A **checksum** helps: it is a hash, and different data will almost certainly have different checksums. By storing the checksum for each record, we can identify incomplete writes.
+If we can detect an incomplete write, we can simply ignore it. The last record affected will be the one before the last successful fsync. A **checksum** helps: it is a hash, and different data will almost certainly have different checksums. By storing the checksum for each record (e.g. CRC32 over the rest of the record), we can identify incomplete or corrupted writes on replay and skip them.
 
-We use the standard library’s `crc32.ChecksumIEEE()` to compute the checksum for log records and prepend it to the record:
-
-| crc32   | key size | val size | deleted | key data | val data |
-|---------|----------|----------|---------|----------|----------|
-| 4 bytes | 4 bytes  | 4 bytes  | 1 byte  | ...      | ...      |
+The implementation uses `crc32.ChecksumIEEE()` and prepends the checksum to each WAL record as in the table above.
