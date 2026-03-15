@@ -308,9 +308,10 @@ func (p *parser) parseCreateTable() (*stmtCreateTable, error) {
 	}
 	p.i++
 	p.skipSpace()
-	if p.i < len(p.s) && p.s[p.i] == ')' {
-		p.i++
+	if p.i >= len(p.s) || p.s[p.i] != ')' {
+		return nil, errInvalidValue
 	}
+	p.i++
 	return &stmtCreateTable{Table: table, Cols: cols, Pkey: pkey}, nil
 }
 

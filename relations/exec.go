@@ -35,11 +35,16 @@ func (db *DB) execCreateTable(s *stmtCreateTable) (ExecResult, error) {
 	}
 	pkeyIdx := make([]int, 0, len(s.Pkey))
 	for _, name := range s.Pkey {
+		found := false
 		for i, c := range s.Cols {
 			if c.Name == name {
 				pkeyIdx = append(pkeyIdx, i)
+				found = true
 				break
 			}
+		}
+		if !found {
+			return ExecResult{}, fmt.Errorf("primary key column %q not found in table columns", name)
 		}
 	}
 	schema := &Schema{
