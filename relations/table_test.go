@@ -61,3 +61,61 @@ func TestTableByPKey(t *testing.T) {
 	ok, err = db.Select(schema, row)
 	assert.True(t, !ok && err == nil)
 }
+
+func mustParseStmt(t *testing.T, s string) interface{} {
+	stmt, err := ParseStmt(s)
+	assert.Nil(t, err)
+	return stmt
+}
+
+func TestSQLByPKey(t *testing.T) {
+	const path = ".test_db"
+	defer os.Remove(path)
+	os.Remove(path)
+
+	db := DB{}
+	err := db.Open(path)
+	assert.Nil(t, err)
+	defer db.Close()
+
+	s := "create table link (time int64, src string, dst string, primary key (src, dst));"
+	_, err = db.ExecStmt(mustParseStmt(t, s))
+	assert.Nil(t, err)
+
+	s = "insert into link values (123, 'bob', 'alice');"
+	r, err := db.ExecStmt(mustParseStmt(t, s))
+	assert.Nil(t, err)
+	assert.Equal(t, 1, r.Updated)
+
+	s = "select time from link where dst = 'alice' and src = 'bob';"
+	r, err = db.ExecStmt(mustParseStmt(t, s))
+	assert.Nil(t, err)
+	assert.Equal(t, []Row{{Cell{Type: CellTypeI64, I64: 123}}}, r.Values)
+
+	s = "update link set time = 456 where dst = 'alice' and src = 'bob';"
+	r, err = db.ExecStmt(mustParseStmt(t, s))
+	assert.Nil(t, err)
+	assert.Equal(t, 1, r.Updated)
+
+	s = "select time from link where dst = 'alice' and src = 'bob';"
+	r, err = db.ExecStmt(mustParseStmt(t, s))
+	assert.Nil(t, err)
+	assert.Equal(t, []Row{{Cell{Type: CellTypeI64, I64: 456}}}, r.Values)
+
+	// reopen — catalog is persisted, so no need to re-create table
+	err = db.Close()
+	assert.Nil(t, err)
+	db = DB{}
+	err = db.Open(path)
+	assert.Nil(t, err)
+
+	s = "delete from link where src = 'bob' and dst = 'alice';"
+	r, err = db.ExecStmt(mustParseStmt(t, s))
+	assert.Nil(t, err)
+	assert.Equal(t, 1, r.Updated)
+
+	s = "select time from link where dst = 'alice' and src = 'bob';"
+	r, err = db.ExecStmt(mustParseStmt(t, s))
+	assert.Nil(t, err)
+	assert.Equal(t, 0, len(r.Values))
+}
