@@ -52,6 +52,20 @@ func (w *wal) append(rec *record) error {
 	return w.file.Sync()
 }
 
+// reset truncates the WAL (used after LSM flush). Caller must ensure no concurrent use.
+func (w *wal) reset() error {
+	if w.file == nil {
+		return nil
+	}
+	if err := w.file.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := w.file.Seek(0, 0); err != nil {
+		return err
+	}
+	return w.file.Sync()
+}
+
 // read decodes the next record from the log into rec.
 // Returns (true, nil) when no more records (EOF, truncated, or bad checksum).
 func (w *wal) read(rec *record) (done bool, err error) {
@@ -63,6 +77,35 @@ func (w *wal) read(rec *record) (done bool, err error) {
 		return false, err
 	}
 	return false, nil
+}
+
+// createFileSync creates a new file at path (overwrites if exists) and syncs the directory.
+// Use for new files only (e.g. SSTable). Caller must close the file.
+func createFileSync(filePath string) (*os.File, error) {
+	f, err := os.Create(filePath)
+	if err != nil {
+		return nil, err
+	}
+	if err := syncDir(filePath); err != nil {
+		f.Close()
+		os.Remove(filePath)
+		return nil, err
+	}
+	return f, nil
+}
+
+// openFileSync opens a file for read-write, creating it if it does not exist (does not truncate).
+// Syncs the directory so new file creation is durable. Use for meta files.
+func openFileSync(filePath string) (*os.File, error) {
+	f, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syncDir(filePath); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 // syncDir fsyncs the directory containing filePath so that file creation/rename/delete

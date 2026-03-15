@@ -1,80 +1,263 @@
 package simpledb
 
-import "bytes"
+import (
+	"bytes"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+)
 
-// Store is a durable key-value store backed by an in-memory table and a write-ahead log.
-// All mutations are appended to the WAL and synced before returning; on Open, the WAL
-// is replayed to reconstruct state.
-type Store struct {
-	memtable map[string][]byte
-	wal      *wal
+// KV is a durable key-value store using an LSM layout (like 0704): write-ahead log,
+// in-memory sorted MemTable (keys/vals arrays in SortedArray), and immutable SSTables.
+// There is no separate "map mode"; the in-memory state is always sorted key/value arrays.
+type KV struct {
+	// options
+	dir          string
+	logThreshold int
+	growthFactor float32
+
+	// persistence
+	log  *wal
+	meta KVMetaStore
+
+	// in-memory sorted keys/vals (and tombstones)
+	mem *SortedArray
+
+	// on-disk levels (newest first)
+	main []*SortedFile
 }
 
-// Open opens or creates the database at the path given in cfg. If the WAL exists,
-// it is replayed to restore the in-memory state (incomplete or corrupted tail
-// records are skipped).
-func Open(cfg Config) (*Store, error) {
+// Open opens or creates the database. Path is always a directory; WAL and SSTables live under it.
+// If LogThreshold <= 0 it defaults to 1000. If GrowthFactor < 2.0 it defaults to 2.0.
+func Open(cfg Config) (*KV, error) {
 	if cfg.Path == "" {
 		cfg.Path = ".simpledb"
 	}
-	s := &Store{
-		memtable: make(map[string][]byte),
-		wal:      &wal{},
+	threshold := cfg.LogThreshold
+	if threshold <= 0 {
+		threshold = 1000
 	}
-	if err := s.wal.open(cfg.Path); err != nil {
+	growth := cfg.GrowthFactor
+	if growth < 2.0 {
+		growth = 2.0
+	}
+	kv := &KV{
+		dir:          cfg.Path,
+		logThreshold: threshold,
+		growthFactor: growth,
+		mem:          &SortedArray{},
+		main:         nil,
+	}
+	if err := kv.openAll(); err != nil {
+		_ = kv.Close()
 		return nil, err
 	}
-	// Replay WAL to restore state.
+	return kv, nil
+}
+
+func (kv *KV) openAll() error {
+	if err := os.MkdirAll(kv.dir, 0o755); err != nil {
+		return err
+	}
+	if err := kv.meta.Open(kv.dir); err != nil {
+		return err
+	}
+	walPath := filepath.Join(kv.dir, "wal")
+	kv.log = &wal{}
+	if err := kv.log.open(walPath); err != nil {
+		kv.meta.Close()
+		return err
+	}
+	// Replay WAL into MemTable (sorted; last write per key wins)
 	var rec record
 	for {
-		done, err := s.wal.read(&rec)
+		done, err := kv.log.read(&rec)
 		if err != nil {
-			_ = s.wal.close()
-			return nil, err
+			kv.log.close()
+			kv.meta.Close()
+			return err
 		}
 		if done {
 			break
 		}
-		key := string(rec.key)
 		if rec.deleted {
-			delete(s.memtable, key)
+			kv.mem.delOrTombstone(rec.key)
 		} else {
-			s.memtable[key] = rec.val
+			kv.mem.set(rec.key, rec.val)
 		}
 	}
-	return s, nil
+	// Open existing SSTables
+	meta := kv.meta.Get()
+	for _, name := range meta.SSTables {
+		fpath := filepath.Join(kv.dir, name)
+		sf := &SortedFile{FileName: fpath}
+		if err := sf.Open(); err != nil {
+			continue
+		}
+		kv.main = append(kv.main, sf)
+	}
+	return nil
 }
 
-// Close closes the store and the underlying WAL. The store must not be used after Close.
-func (s *Store) Close() error {
-	s.memtable = nil
-	return s.wal.close()
+// Close closes the store. Safe to call multiple times.
+func (kv *KV) Close() error {
+	for _, f := range kv.main {
+		_ = f.Close()
+	}
+	kv.main = nil
+	kv.meta.Close()
+	if kv.log != nil {
+		err := kv.log.close()
+		kv.log = nil
+		return err
+	}
+	return nil
+}
+
+// Seek returns an iterator at the first entry with key >= key, skipping deleted entries.
+func (kv *KV) Seek(key []byte) (SortedKVIter, error) {
+	levels := make(MergedSortedKV, 0, 1+len(kv.main))
+	levels = append(levels, kv.mem)
+	for _, f := range kv.main {
+		levels = append(levels, f)
+	}
+	iter, err := levels.Seek(key)
+	if err != nil {
+		return nil, err
+	}
+	return filterDeleted(iter)
 }
 
 // Get returns the value for key. ok is false if the key is missing or was deleted.
-func (s *Store) Get(key []byte) (value []byte, ok bool, err error) {
-	v, ok := s.memtable[string(key)]
-	return v, ok, nil
+func (kv *KV) Get(key []byte) (value []byte, ok bool, err error) {
+	iter, err := kv.Seek(key)
+	if err != nil {
+		return nil, false, err
+	}
+	ok = iter.Valid() && bytes.Equal(iter.Key(), key)
+	if ok {
+		value = iter.Val()
+	}
+	return value, ok, err
 }
 
 // Set writes key-value. It returns updated=true if the key was new or the value changed.
-func (s *Store) Set(key, value []byte) (updated bool, err error) {
-	k := string(key)
-	if v, exists := s.memtable[k]; exists && bytes.Equal(v, value) {
+func (kv *KV) Set(key, value []byte) (updated bool, err error) {
+	oldVal, exist, err := kv.Get(key)
+	if err != nil {
+		return false, err
+	}
+	updated = !exist || !bytes.Equal(oldVal, value)
+	if !updated {
 		return false, nil
 	}
-	s.memtable[k] = value
-	err = s.wal.append(&record{key: key, val: value, deleted: false})
-	return true, err
+	if err := kv.log.append(&record{key: key, val: value, deleted: false}); err != nil {
+		return true, err
+	}
+	kv.mem.Set(key, value)
+	if err := kv.Compact(); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 // Del removes key. It returns updated=true if the key existed.
-func (s *Store) Del(key []byte) (updated bool, err error) {
-	k := string(key)
-	if _, ok := s.memtable[k]; !ok {
-		return false, nil
+func (kv *KV) Del(key []byte) (updated bool, err error) {
+	_, exist, err := kv.Get(key)
+	if err != nil || !exist {
+		return false, err
 	}
-	delete(s.memtable, k)
-	err = s.wal.append(&record{key: key, deleted: true})
-	return true, err
+	if err := kv.log.append(&record{key: key, deleted: true}); err != nil {
+		return true, err
+	}
+	kv.mem.Del(key)
+	return true, nil
+}
+
+// Compact flushes the MemTable if it exceeds LogThreshold, then merges adjacent
+// SSTables when shouldMerge(i) is true (cur*growthFactor >= cur+next).
+func (kv *KV) Compact() error {
+	if kv.mem.Size() >= kv.logThreshold {
+		if err := kv.compactLog(); err != nil {
+			return err
+		}
+	}
+	for i := 0; i < len(kv.main)-1; i++ {
+		if kv.shouldMerge(i) {
+			if err := kv.compactSSTable(i); err != nil {
+				return err
+			}
+			i--
+			continue
+		}
+	}
+	return nil
+}
+
+func (kv *KV) shouldMerge(idx int) bool {
+	cur := kv.main[idx].EstimatedSize()
+	next := kv.main[idx+1].EstimatedSize()
+	return float32(cur)*kv.growthFactor >= float32(cur+next)
+}
+
+func (kv *KV) compactLog() error {
+	meta := kv.meta.Get()
+	meta.Version++
+	name := fmt.Sprintf("sstable_%d", meta.Version)
+	fpath := filepath.Join(kv.dir, name)
+	sf := &SortedFile{FileName: fpath}
+	var source SortedKV = kv.mem
+	if len(kv.main) == 0 {
+		source = NoDeletedSortedKV{source}
+	}
+	if err := sf.CreateFromSorted(source); err != nil {
+		os.Remove(fpath)
+		return err
+	}
+	if err := sf.Open(); err != nil {
+		os.Remove(fpath)
+		return err
+	}
+	meta.SSTables = append([]string{name}, meta.SSTables...)
+	if err := kv.meta.Set(meta); err != nil {
+		sf.Close()
+		return err
+	}
+	kv.main = append([]*SortedFile{sf}, kv.main...)
+	kv.mem.Clear()
+	return kv.log.reset()
+}
+
+func (kv *KV) compactSSTable(level int) error {
+	meta := kv.meta.Get()
+	meta.Version++
+	name := fmt.Sprintf("sstable_%d", meta.Version)
+	fpath := filepath.Join(kv.dir, name)
+	sf := &SortedFile{FileName: fpath}
+	merged := MergedSortedKV{kv.main[level], kv.main[level+1]}
+	var source SortedKV = merged
+	if len(kv.main) == level+2 {
+		source = NoDeletedSortedKV{source}
+	}
+	if err := sf.CreateFromSorted(source); err != nil {
+		os.Remove(fpath)
+		return err
+	}
+	if err := sf.Open(); err != nil {
+		os.Remove(fpath)
+		return err
+	}
+	meta.SSTables = slices.Replace(meta.SSTables, level, level+2, name)
+	if err := kv.meta.Set(meta); err != nil {
+		sf.Close()
+		return err
+	}
+	old1, old2 := kv.main[level], kv.main[level+1]
+	kv.main = slices.Replace(kv.main, level, level+2, sf)
+	old1.Close()
+	old2.Close()
+	os.Remove(old1.FileName)
+	os.Remove(old2.FileName)
+	return nil
 }

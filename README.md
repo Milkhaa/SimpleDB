@@ -2,6 +2,8 @@
 
 A minimal database implementation with append-only logging, durability guarantees, and checksummed records.
 
+**LSM mode:** Set `Config.LogThreshold > 0` and use `Config.Path` as a directory to enable an LSM-style layout: a write-ahead log, an in-memory sorted MemTable, and immutable SSTables on disk. When the MemTable size reaches `LogThreshold`, it is flushed to a new SSTable and the log is truncated. Reads merge the MemTable and all SSTables (newest wins for duplicate keys). Deletes are stored as tombstones so older levels do not resurrect keys.
+
 ---
 
 ## Data serialization

@@ -13,11 +13,11 @@ func schemaKey(tableName string) []byte {
 
 // DB provides relational operations on top of the key-value store.
 type DB struct {
-	store  *kv.Store
+	store  *kv.KV
 	tables map[string]*Schema
 }
 
-// Open opens or creates the database at path (WAL file path). Schemas are loaded on demand via GetSchema.
+// Open opens or creates the database at path (directory for LSM). Schemas are loaded on demand via GetSchema.
 func (db *DB) Open(path string) error {
 	s, err := kv.Open(kv.Config{Path: path})
 	if err != nil {
