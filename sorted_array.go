@@ -66,12 +66,14 @@ func (it *sortedArrayIter) Prev() error {
 	return nil
 }
 
+// Clear removes all entries. Used after flushing the MemTable to an SSTable.
 func (a *SortedArray) Clear() {
 	a.keys = a.keys[:0]
 	a.vals = a.vals[:0]
 	a.deleted = a.deleted[:0]
 }
 
+// set inserts or overwrites key→val (internal use, e.g. WAL replay). Does not return updated.
 func (a *SortedArray) set(key, val []byte) {
 	keyCopy := append([]byte(nil), key...)
 	valCopy := append([]byte(nil), val...)
@@ -92,6 +94,7 @@ func (a *SortedArray) set(key, val []byte) {
 	}
 }
 
+// del marks an existing key as deleted; returns false if key missing or already deleted (internal use).
 func (a *SortedArray) del(key []byte) bool {
 	idx, found := slices.BinarySearchFunc(a.keys, key, bytes.Compare)
 	if !found {

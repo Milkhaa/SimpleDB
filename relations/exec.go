@@ -5,6 +5,16 @@ import (
 	"fmt"
 )
 
+// columnIndex returns the index of the schema column with the given name, or -1 if not found.
+func columnIndex(schema *Schema, name string) int {
+	for i, c := range schema.Cols {
+		if c.Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
 // ExecResult is the result of executing a statement.
 type ExecResult struct {
 	Updated int
@@ -35,17 +45,11 @@ func (db *DB) execCreateTable(s *stmtCreateTable) (ExecResult, error) {
 	}
 	pkeyIdx := make([]int, 0, len(s.Pkey))
 	for _, name := range s.Pkey {
-		found := false
-		for i, c := range s.Cols {
-			if c.Name == name {
-				pkeyIdx = append(pkeyIdx, i)
-				found = true
-				break
-			}
-		}
-		if !found {
+		i := columnIndex(&Schema{Cols: s.Cols}, name)
+		if i < 0 {
 			return ExecResult{}, fmt.Errorf("primary key column %q not found in table columns", name)
 		}
+		pkeyIdx = append(pkeyIdx, i)
 	}
 	schema := &Schema{
 		Table: s.Table,
@@ -124,17 +128,11 @@ func (db *DB) execUpdate(s *stmtUpdate) (ExecResult, error) {
 		return ExecResult{Updated: 0}, nil
 	}
 	for _, nv := range s.Value {
-		found := false
-		for i, c := range schema.Cols {
-			if c.Name == nv.Column {
-				row[i] = nv.Value
-				found = true
-				break
-			}
-		}
-		if !found {
+		i := columnIndex(schema, nv.Column)
+		if i < 0 {
 			return ExecResult{}, fmt.Errorf("unknown column %q", nv.Column)
 		}
+		row[i] = nv.Value
 	}
 	updated, err := db.Update(schema, row)
 	if err != nil {
@@ -169,17 +167,11 @@ func (db *DB) execDelete(s *stmtDelete) (ExecResult, error) {
 
 func fillRowFromKeys(schema *Schema, row Row, keys []sqlNamedCell) error {
 	for _, k := range keys {
-		found := false
-		for i, c := range schema.Cols {
-			if c.Name == k.Column {
-				row[i] = k.Value
-				found = true
-				break
-			}
-		}
-		if !found {
+		i := columnIndex(schema, k.Column)
+		if i < 0 {
 			return fmt.Errorf("unknown column %q", k.Column)
 		}
+		row[i] = k.Value
 	}
 	return nil
 }
@@ -187,17 +179,11 @@ func fillRowFromKeys(schema *Schema, row Row, keys []sqlNamedCell) error {
 func projectRow(schema *Schema, row Row, cols []string) (Row, error) {
 	out := make(Row, len(cols))
 	for j, name := range cols {
-		found := false
-		for i, c := range schema.Cols {
-			if c.Name == name {
-				out[j] = row[i]
-				found = true
-				break
-			}
-		}
-		if !found {
+		i := columnIndex(schema, name)
+		if i < 0 {
 			return nil, fmt.Errorf("unknown column %q", name)
 		}
+		out[j] = row[i]
 	}
 	return out, nil
 }

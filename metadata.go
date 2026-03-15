@@ -15,14 +15,17 @@ type KVMetaData struct {
 	SSTables []string
 }
 
+// metaSlot holds an open meta file and its cached data.
+type metaSlot struct {
+	path string
+	fp   *os.File
+	data KVMetaData
+}
+
 // KVMetaStore persists metadata with double-buffering (two slots, alternate writes).
 // Slot data is cached after Open and after Set so Get/current do not read from disk.
 type KVMetaStore struct {
-	slots [2]struct {
-		path string
-		fp   *os.File
-		data KVMetaData
-	}
+	slots [2]metaSlot
 }
 
 func (m *KVMetaStore) Open(dir string) error {

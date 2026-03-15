@@ -29,23 +29,13 @@ type KV struct {
 }
 
 // Open opens or creates the database. Path is always a directory; WAL and SSTables live under it.
-// If LogThreshold <= 0 it defaults to 1000. If GrowthFactor < 2.0 it defaults to 2.0.
+// Zero or invalid Config fields are replaced with defaults (see config.go).
 func Open(cfg Config) (*KV, error) {
-	if cfg.Path == "" {
-		cfg.Path = ".simpledb"
-	}
-	threshold := cfg.LogThreshold
-	if threshold <= 0 {
-		threshold = 1000
-	}
-	growth := cfg.GrowthFactor
-	if growth < 2.0 {
-		growth = 2.0
-	}
+	cfg.applyDefaults()
 	kv := &KV{
 		dir:          cfg.Path,
-		logThreshold: threshold,
-		growthFactor: growth,
+		logThreshold: cfg.LogThreshold,
+		growthFactor: cfg.GrowthFactor,
 		mem:          &SortedArray{},
 		main:         nil,
 	}
@@ -115,13 +105,20 @@ func (kv *KV) Close() error {
 	return nil
 }
 
-// Seek returns an iterator at the first entry with key >= key, skipping deleted entries.
-func (kv *KV) Seek(key []byte) (SortedKVIter, error) {
+// buildLevels returns all levels in merge order: mem first, then main (newest first).
+// Callers use this for Seek/Iter over the logical merged view.
+func (kv *KV) buildLevels() MergedSortedKV {
 	levels := make(MergedSortedKV, 0, 1+len(kv.main))
 	levels = append(levels, kv.mem)
 	for _, f := range kv.main {
 		levels = append(levels, f)
 	}
+	return levels
+}
+
+// Seek returns an iterator at the first entry with key >= key, skipping deleted entries.
+func (kv *KV) Seek(key []byte) (SortedKVIter, error) {
+	levels := kv.buildLevels()
 	iter, err := levels.Seek(key)
 	if err != nil {
 		return nil, err
@@ -201,6 +198,7 @@ func (kv *KV) shouldMerge(idx int) bool {
 	return float32(cur)*kv.growthFactor >= float32(cur+next)
 }
 
+// compactLog flushes the MemTable to a new SSTable, clears mem, and resets the WAL.
 func (kv *KV) compactLog() error {
 	meta := kv.meta.Get()
 	meta.Version++
@@ -229,6 +227,7 @@ func (kv *KV) compactLog() error {
 	return kv.log.reset()
 }
 
+// compactSSTable merges main[level] and main[level+1] into one SSTable and replaces them.
 func (kv *KV) compactSSTable(level int) error {
 	meta := kv.meta.Get()
 	meta.Version++

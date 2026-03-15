@@ -9,6 +9,7 @@ import (
 const sortedFileEntryHeader = 4 + 4 + 1 // keyLen, valLen, deleted
 
 // SortedFile is an immutable on-disk sorted key-value file (SSTable).
+// Layout: 8-byte key count, N×8-byte offsets, then N entries (each 4+4+1 + key + val).
 type SortedFile struct {
 	FileName string
 	fp       *os.File
@@ -16,6 +17,7 @@ type SortedFile struct {
 	offsets  []uint64
 }
 
+// Close closes the file. Safe to call multiple times.
 func (f *SortedFile) Close() error {
 	if f.fp == nil {
 		return nil
@@ -25,6 +27,7 @@ func (f *SortedFile) Close() error {
 	return err
 }
 
+// Open opens the file for reading and loads the index (key count and offsets).
 func (f *SortedFile) Open() error {
 	if f.fp != nil {
 		return nil
@@ -55,6 +58,7 @@ func (f *SortedFile) Open() error {
 
 func (f *SortedFile) EstimatedSize() int { return f.nkeys }
 
+// readEntry reads the key, value, and deleted flag for the entry at pos.
 func (f *SortedFile) readEntry(pos int) (key, val []byte, deleted bool, err error) {
 	if pos < 0 || pos >= f.nkeys {
 		return nil, nil, false, nil
