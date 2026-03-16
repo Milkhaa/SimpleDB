@@ -1,8 +1,10 @@
 # Relations package
 
-Relational-style tables and a small SQL executor on top of the SimpleDB key-value store. Rows are stored as key-value pairs: the key is the table name plus primary-key columns; the value is the remaining columns.
+Relational-style tables and a small SQL executor on top of the **engine** package (LSM key-value store). Rows are stored as key-value pairs: the key is the table name plus primary-key columns; the value is the remaining columns.
 
 **Import path:** `github.com/Milkhaa/SimpleDB/relations`
+
+Storage is provided by `github.com/Milkhaa/SimpleDB/engine`; `DB.Open(path)` opens the engine at the given directory.
 
 ---
 
@@ -33,9 +35,9 @@ A **Cell** holds one value. Supported types are:
 
 ### DB
 
-**DB** is the relational interface. It wraps the key-value store and a table catalog (schemas keyed by table name). Each table’s schema is persisted under the key `@schema_` + table name and loaded on demand.
+**DB** is the relational interface. It wraps the engine key-value store and a table catalog (schemas keyed by table name). Each table’s schema is persisted under the key `@schema_` + table name and loaded on demand.
 
-- **Open(path string) error** — Opens or creates the database at `path` (a **directory**; the KV store uses it for WAL and SSTables). Schemas are loaded on demand via GetSchema.
+- **Open(path string) error** — Opens or creates the database at `path` (a **directory**; the engine uses it for WAL and SSTables). Schemas are loaded on demand via GetSchema.
 - **Close() error** — Closes the store.
 - **GetSchema(table string) (*Schema, error)** — Returns the schema for the table, loading from the store if not cached. Returns an error if the table does not exist.
 - **Schema(table string) *Schema** — Returns the cached schema for the table, or nil (does not load from the store).
@@ -45,7 +47,6 @@ A **Cell** holds one value. Supported types are:
 - **Update(schema, row) (updated bool, err error)** — Overwrites the row by primary key (same as Insert).
 - **Delete(schema, row) (deleted bool, err error)** — Removes the row by primary key. Returns `true` if it existed.
 
----
 
 ## SQL (query language)
 

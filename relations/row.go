@@ -1,4 +1,4 @@
-package simpledb
+package relations
 
 import "fmt"
 
@@ -15,7 +15,7 @@ func (r Row) EncodeKey(schema *Schema) ([]byte, error) {
 	key = append(key, 0)
 	for _, idx := range schema.PKey {
 		if idx >= len(r) {
-			return nil, fmt.Errorf("simpledb: PKey index %d out of row length %d", idx, len(r))
+			return nil, fmt.Errorf("relations: PKey index %d out of row length %d", idx, len(r))
 		}
 		key = r[idx].Encode(key)
 	}
@@ -35,7 +35,7 @@ func (r Row) EncodeVal(schema *Schema) ([]byte, error) {
 	for i := range schema.Cols {
 		if !pkeySet[i] {
 			if i >= len(r) {
-				return nil, fmt.Errorf("simpledb: column index %d out of row length %d", i, len(r))
+				return nil, fmt.Errorf("relations: column index %d out of row length %d", i, len(r))
 			}
 			val = r[i].Encode(val)
 		}
@@ -54,17 +54,17 @@ func (r *Row) DecodeKey(schema *Schema, key []byte) error {
 		i++
 	}
 	if i >= len(key) {
-		return fmt.Errorf("simpledb: key missing table name terminator")
+		return fmt.Errorf("relations: key missing table name terminator")
 	}
 	tableName := string(key[:i])
 	if tableName != schema.Table {
-		return fmt.Errorf("simpledb: table name mismatch: key %q vs schema %q", tableName, schema.Table)
+		return fmt.Errorf("relations: table name mismatch: key %q vs schema %q", tableName, schema.Table)
 	}
 	i++ // consume the 0
 	rest := key[i:]
 	for _, idx := range schema.PKey {
 		if idx >= len(*r) {
-			return fmt.Errorf("simpledb: PKey index %d out of row length %d", idx, len(*r))
+			return fmt.Errorf("relations: PKey index %d out of row length %d", idx, len(*r))
 		}
 		var err error
 		rest, err = (*r)[idx].Decode(rest)
@@ -90,7 +90,7 @@ func (r *Row) DecodeVal(schema *Schema, val []byte) error {
 			continue
 		}
 		if i >= len(*r) {
-			return fmt.Errorf("simpledb: column index %d out of row length %d", i, len(*r))
+			return fmt.Errorf("relations: column index %d out of row length %d", i, len(*r))
 		}
 		var err error
 		rest, err = (*r)[i].Decode(rest)

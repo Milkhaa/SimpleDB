@@ -1,10 +1,10 @@
-package simpledb
+package relations
 
 import (
 	"encoding/json"
 	"errors"
 
-	kv "github.com/Milkhaa/SimpleDB"
+	"github.com/Milkhaa/SimpleDB/engine"
 )
 
 func schemaKey(tableName string) []byte {
@@ -13,13 +13,13 @@ func schemaKey(tableName string) []byte {
 
 // DB provides relational operations on top of the key-value store.
 type DB struct {
-	store  *kv.KV
+	store  *engine.KV
 	tables map[string]*Schema
 }
 
 // Open opens or creates the database at path (directory for LSM). Schemas are loaded on demand via GetSchema.
 func (db *DB) Open(path string) error {
-	s, err := kv.Open(kv.Config{Path: path})
+	s, err := engine.Open(engine.Config{Path: path})
 	if err != nil {
 		return err
 	}

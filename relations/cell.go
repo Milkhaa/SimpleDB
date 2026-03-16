@@ -1,4 +1,4 @@
-package simpledb
+package relations
 
 import (
 	"encoding/binary"
@@ -33,7 +33,7 @@ func (c *Cell) Encode(dst []byte) []byte {
 		copy(buf[4:], c.Str)
 		return append(dst, buf...)
 	default:
-		panic(fmt.Sprintf("simpledb: unknown CellType: %v", c.Type))
+		panic(fmt.Sprintf("relations: unknown CellType: %v", c.Type))
 	}
 }
 
@@ -58,6 +58,6 @@ func (c *Cell) Decode(src []byte) (rest []byte, err error) {
 		c.Str = append(c.Str[:0], src[4:4+n]...)
 		return src[4+n:], nil
 	default:
-		return src, fmt.Errorf("simpledb: unknown CellType: %v", c.Type)
+		return src, fmt.Errorf("relations: unknown CellType: %v", c.Type)
 	}
 }

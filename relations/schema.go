@@ -1,4 +1,4 @@
-package simpledb
+package relations
 
 // Column describes a column name and type.
 type Column struct {

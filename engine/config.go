@@ -1,4 +1,4 @@
-package simpledb
+package engine
 
 // Default configuration values when fields are zero or invalid.
 const (
@@ -7,7 +7,7 @@ const (
 	DefaultGrowthFactor = 2.0
 )
 
-// Config holds options for opening the database.
+// Config holds options for opening the key-value store.
 type Config struct {
 	// Path is the database directory (WAL and SSTables live under it).
 	// If empty, DefaultPath is used.
