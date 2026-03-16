@@ -1,31 +1,54 @@
-# SimpleDB
+# Database
+Database internals and computer science basics required to build your own database.
 
-A minimal database implementation with append-only logging, durability guarantees, and checksummed records.
+- KV storage engine.
+- SQL and relational databases.
+- Indexes and data structures.
 
----
+
+Software called databases comes in many forms. Some are pure in-memory, such as Redis and Memcached. Some are disk-based, such as MySQL and SQLite.
+
+
+In-memory databases are limited by RAM size, so traditional databases are disk-based. But even disk-based databases often include in-memory data structures. So different types of databases are not unrelated.
+
+## KV storage engine.
+In terms of features, relational databases seem to do more. However, more complex relational databases are built on simpler KV systems, often called storage engines.
+For example, LevelDB and RocksDB can be used as standalone KV stores, and also have SQL DBs built on top. So database implementation starts from KV.
+
+
+We can start with :
+```
+type KV struct {
+	log Log
+	mem map[string][]byte // or an in-memory arrays of keys and values
+}
+
+type Log struct {
+	FileName string
+	fp       *os.File
+}
+```
+
+Each data write is written to a in-memory map, and for that to survive a restart , save the data in an append only file as well on disk. On DB restart, this log is replayed to the in-memory map.
 
 ## Data serialization
-
 To store data types from a programming language on disk or send them over a network, they must be converted into a byte sequence. This is called **serialization**.
 
 ### Serialization methods
 
-All serialization methods are similar, differing only in details. To serialize variable-length data like strings, the simplest way is to put the length first, then the data. The length is an integer, and there are many ways to encode it: some formats use 2 bytes, some 4 bytes, some use variable-length varint, and some (e.g. Redis) use decimal digits.
+All serialization methods are similar in spirit. For variable-length data like strings, the simplest scheme is: **store the length first, then the bytes**. The length is just an integer; you can choose 2 bytes, 4 bytes, a varint, decimal text, etc.
 
-Besides binary format, there are text formats such as JSON and XML. “Binary” has nothing to do with number bases; it is just the opposite of “text”. Most text formats do not encode string length but use delimiters to mark the end of data (JSON uses quotes, XML uses tags).
+There are also text formats like JSON and XML. Here “binary” just means “not text.” Text formats usually don’t store lengths; they use delimiters (quotes, tags) to mark where data ends.
 
-Text formats look intuitive but are hard to implement. Because encoded data cannot contain delimiters, text formats require complex escaping. Even simple JSON has many bugs across implementations. Compared to simple binary serialization, text formats also waste CPU.
+Text formats feel intuitive but are tricky to implement correctly. Because data cannot contain delimiters, you need escaping rules, and real-world JSON/XML parsers often have subtle bugs. They also tend to be slower and bulkier than a simple binary format.
 
-Beyond complexity, text formats often have arbitrary limits. For example, JSON cannot support arbitrary binary data (so base64 is used, which wastes more), and many JSON libraries do not support 64-bit integers. **Unless necessary, do not use text formats.**
+Binary formats avoid these issues. Libraries like Protobuf or MsgPack exist, but for low-level systems it’s often easiest—and perfectly fine—to define a tiny custom binary encoding rather than depend on a heavy text format.
 
-For binary serialization, there are implementations like Protobuf and MsgPack, but they are not as widely used as JSON. Many low-level projects invent their own formats—binary serialization is simple and often not worth adding a library dependency. Text formats, due to their complexity, are best handled by a library.
-
----
 
 ## Durability
+A database guarantees that written data is not lost. This guarantee is defined by a successful return to the caller. If the database crashes before returning, the state is uncertain to the caller. But if the caller receives success, it can trust the write not disappearing.
 
 ### Append-only logs
-
 Like text logs, a database log only appends entries at the end of the file and never modifies or deletes existing entries. Log entries record every update to the database.
 
 When the database starts, it reads the log and applies updates in order, producing the final state.
@@ -36,10 +59,7 @@ When the database starts, it reads the log and applies updates in order, produci
 |----------|----------|---------|----------|----------|
 | 4 bytes  | 4 bytes  | 1 byte  | ...      | ...      |
 
-Since data is stored on disk, we must ensure it is actually written. If we only write to a file, a power loss can cause the file to disappear or be filled with `0x00`. A database must guarantee that written data is not lost—this is **durability**. The guarantee is defined by a successful return to the caller: if the caller receives success, it can trust the write will not disappear.
-
 ### OS page cache and fsync
-
 Each file write does not directly map to a disk write. The OS has a memory cache; writes go to the cache first, then are synced to disk later. This allows merging repeated writes and improves throughput (repeated reads also benefit).
 
 To ensure data reaches disk, an operation must flush all cache layers and wait for completion. On Linux this is the **fsync** syscall; in Go, call it via `Sync()` on `*os.File`.
@@ -60,14 +80,10 @@ func syncDir(file string) error {
 }
 ```
 
----
-
 ## Atomicity
-
 When appending a record to the log, we want it to be either completely written or not written at all—**atomicity**. File writes do not guarantee atomicity in the case of power loss. Only the last record will be affected; previously fsynced records remain intact. This is another reason to use a log in databases.
 
 ### Achieving atomicity for log/disk writes
-
 If we can detect an incomplete write, we can simply ignore it. The last record affected will be the one before the last successful fsync. A **checksum** helps: it is a hash, and different data will almost certainly have different checksums. By storing the checksum for each record, we can identify incomplete writes.
 
 We use the standard library’s `crc32.ChecksumIEEE()` to compute the checksum for log records and prepend it to the record:
@@ -77,19 +93,19 @@ We use the standard library’s `crc32.ChecksumIEEE()` to compute the checksum f
 | 4 bytes | 4 bytes  | 4 bytes  | 1 byte  | ...      | ...      |
 
 
+
 ## LSM Tree:
 Right now, our DB is log + in-memory array. It’s an in-memory DB with durability. Data size is limited by memory, so we need disk-based data structures.
 
 There is a way to achieve updates without updating data: the log-structured merge tree (LSM-Tree).
-
 - On update, add a new data structure to the set.
 - Merge existing data structures to keep the set size from unlimited growth.
 - On query, search all data structures and merge results
 
 
-Log-structured Merge Tree and B+Tree are the only 2 choices to build a general-purpose DB.
+Log-structured Merge Tree and B+Tree are the only 2 practical choices to build a general-purpose DB.
 
-Our database have 2 levels: MemTable and SSTable. MemTable uses a log for durability, while SSTable is never modified and is only replaced by new files. For queries, results are merged, and the upper MemTable has higher priority. For updates, data goes to the upper level first, then to lower levels.
+In LSM-Tree based implementation, our database have 2 levels: MemTable and SSTable. MemTable uses a log for durability, while SSTable is never modified and is only replaced by new files. For queries, results are merged, and the upper MemTable has higher priority. For updates, data goes to the upper level first, then to lower levels.
 
 A key may exist in multiple levels. Upper levels are newer, so queries go from top to bottom. Deleted keys must be recorded to prevent exposing old versions from lower levels.
 
@@ -146,3 +162,5 @@ It can be seen as a lossy compressed hash table. Details are left to the reader.
 - Space usage is 𝑂(𝑁). Compared to SSTables, it is still small and likely cached in memory.
 - Time complexity is 𝑂(1). This does not affect overall complexity, though.
 - Keys can only be added, not deleted. This is not an issue because SSTables are immutable.
+
+**sparse-index:**
