@@ -5,14 +5,16 @@ import (
 	"fmt"
 )
 
+// CellType is the type of a cell value. Used in Schema and Cell.
 type CellType int
 
 const (
-	CellTypeI64 CellType = iota
-	CellTypeStr
+	CellTypeI64 CellType = iota // 8 bytes little-endian
+	CellTypeStr                 // 4-byte length (LE) then raw bytes
 )
 
-// Cell holds a single value of type CellTypeI64 or CellTypeStr.
+// Cell holds one value. Set Type and the corresponding field (I64 or Str)
+// before Encode; set Type before Decode (Decode fills I64 or Str).
 type Cell struct {
 	Type CellType
 	I64  int64

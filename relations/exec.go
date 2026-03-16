@@ -5,6 +5,10 @@ import (
 	"fmt"
 )
 
+// exec.go implements the SQL executor: ExecStmt dispatches to execCreateTable,
+// execInsert, execSelect, execUpdate, or execDelete. Helper functions
+// (columnIndex, fillRowFromKeys, projectRow) are used by the exec functions.
+
 // columnIndex returns the index of the schema column with the given name, or -1 if not found.
 func columnIndex(schema *Schema, name string) int {
 	for i, c := range schema.Cols {
@@ -24,11 +28,11 @@ func oneIf(b bool) int {
 
 // ExecResult is the result of executing a statement.
 type ExecResult struct {
-	Updated int
-	Values  []Row
+	Updated int   // rows affected for insert/update/delete
+	Values  []Row // result rows for select
 }
 
-// ExecStmt executes a parsed statement.
+// ExecStmt executes a parsed statement (value returned by ParseStmt).
 func (db *DB) ExecStmt(stmt interface{}) (ExecResult, error) {
 	switch s := stmt.(type) {
 	case *stmtCreateTable:

@@ -6,6 +6,22 @@ LSM-style key-value store: write-ahead log (WAL), in-memory sorted MemTable, and
 
 ---
 
+## Package layout
+
+| File | Purpose |
+|------|--------|
+| `store.go` | `KV` type, `Open`/`Close`, `Get`/`Set`/`Del`, compaction |
+| `merge.go` | `SortedKV` abstraction and merge iterator over levels |
+| `sorted_array.go` | In-memory sorted table (MemTable) |
+| `sorted_file.go` | On-disk SSTable format and iteration |
+| `wal.go` | Write-ahead log (append-only, fsynced) |
+| `record.go` | WAL record binary format |
+| `metadata.go` | Persisted metadata (SSTable list, version) |
+| `config.go` | Config and defaults |
+| `errors.go` | Package errors |
+
+---
+
 ## Usage
 
 ```go

@@ -6,7 +6,11 @@ import (
 	"io"
 )
 
-// Log record layout: crc32(4) | keyLen(4) | valLen(4) | deleted(1) | key | val
+// WAL record layout (one record per Set/Del in the write-ahead log):
+//
+//	crc32(4) | keyLen(4) | valLen(4) | deleted(1) | key | val
+//
+// Checksum covers everything after the first 4 bytes; used to detect partial writes on replay.
 const (
 	recordHeaderSize = 4 + 4 + 4 + 1
 	checksumSize     = 4

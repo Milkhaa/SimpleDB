@@ -7,6 +7,9 @@ import (
 	"syscall"
 )
 
+// wal is the write-ahead log: append-only, each append is fsynced for durability.
+// Record format is in record.go. createFileSync/openFileSync sync the directory
+// after creating/opening so new files survive crash (Unix).
 type wal struct {
 	path string
 	file *os.File

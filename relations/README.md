@@ -8,6 +8,20 @@ Storage is provided by `github.com/Milkhaa/SimpleDB/engine`; `DB.Open(path)` ope
 
 ---
 
+## Package layout
+
+| File | Purpose |
+|------|--------|
+| `db.go` | DB, Open/Close, GetSchema/SetSchema, Select/Insert/Update/Delete |
+| `schema.go` | Schema, Column, Validate, NewRow, IsPKey |
+| `row.go` | Row key/value encoding (EncodeKey/Val, DecodeKey/Val) |
+| `cell.go` | Cell, CellType (I64, Str), Encode/Decode |
+| `exec.go` | ExecStmt, ExecResult, exec per statement type |
+| `parser.go` | ParseStmt, SQL grammar, statement structs |
+| `errors.go` | Package errors |
+
+---
+
 ## Types
 
 ### Cell and CellType

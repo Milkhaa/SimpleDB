@@ -1,16 +1,18 @@
 package relations
 
-// Column describes a column name and type.
+// Column is a named column with a Cell type (I64 or Str).
 type Column struct {
 	Name string
 	Type CellType
 }
 
-// Schema describes a table: name, columns, and primary key column indices.
+// Schema describes a table: name, columns in order, and primary key column
+// indices (PKey). PKey order determines key encoding: EncodeKey uses PKey
+// order; DecodeKey expects the same.
 type Schema struct {
 	Table string
 	Cols  []Column
-	PKey  []int // indices into Cols
+	PKey  []int // indices into Cols, in key encoding order
 }
 
 // Validate checks that every PKey index is in range [0, len(Cols)). Returns an error if any are invalid.

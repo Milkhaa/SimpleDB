@@ -8,24 +8,24 @@ import (
 	"slices"
 )
 
-// KV is a durable key-value store using an LSM layout (like 0704): write-ahead log,
-// in-memory sorted MemTable (keys/vals arrays in SortedArray), and immutable SSTables.
-// There is no separate "map mode"; the in-memory state is always sorted key/value arrays.
+// KV is a durable key-value store using an LSM-style layout.
+//
+// Data flow: Writes go to the WAL (for durability) and the in-memory sorted
+// table (mem). Reads merge mem with on-disk SSTables (sstables) via the
+// SortedKV abstraction; newest level wins for duplicate keys. Compaction
+// flushes mem to a new SSTable when it exceeds logThreshold, and merges
+// adjacent SSTables when growthFactor says so.
 type KV struct {
-	// options
 	dir          string
 	logThreshold int
 	growthFactor float32
 
-	// persistence
 	log  *wal
 	meta KVMetaStore
 
-	// in-memory sorted keys/vals (and tombstones)
-	mem *SortedArray
+	mem *SortedArray // in-memory sorted table (MemTable)
 
-	// on-disk levels (newest first)
-	main []*SortedFile
+	sstables []*SortedFile // on-disk SSTables, newest first
 }
 
 // Open opens or creates the database. Path is always a directory; WAL and SSTables live under it.
@@ -37,7 +37,7 @@ func Open(cfg Config) (*KV, error) {
 		logThreshold: cfg.LogThreshold,
 		growthFactor: cfg.GrowthFactor,
 		mem:          &SortedArray{},
-		main:         nil,
+		sstables:     nil,
 	}
 	if err := kv.openAll(); err != nil {
 		_ = kv.Close()
@@ -46,6 +46,8 @@ func Open(cfg Config) (*KV, error) {
 	return kv, nil
 }
 
+// openAll creates the directory, opens metadata and WAL, replays the WAL into
+// the MemTable, then opens all SSTables listed in metadata (newest first).
 func (kv *KV) openAll() error {
 	if err := os.MkdirAll(kv.dir, 0o755); err != nil {
 		return err
@@ -59,7 +61,6 @@ func (kv *KV) openAll() error {
 		kv.meta.Close()
 		return err
 	}
-	// Replay WAL into MemTable (sorted; last write per key wins)
 	var rec record
 	for {
 		done, err := kv.log.read(&rec)
@@ -77,7 +78,6 @@ func (kv *KV) openAll() error {
 			kv.mem.set(rec.key, rec.val)
 		}
 	}
-	// Open existing SSTables
 	meta := kv.meta.Get()
 	for _, name := range meta.SSTables {
 		fpath := filepath.Join(kv.dir, name)
@@ -85,17 +85,17 @@ func (kv *KV) openAll() error {
 		if err := sf.Open(); err != nil {
 			continue
 		}
-		kv.main = append(kv.main, sf)
+		kv.sstables = append(kv.sstables, sf)
 	}
 	return nil
 }
 
 // Close closes the store. Safe to call multiple times.
 func (kv *KV) Close() error {
-	for _, f := range kv.main {
+	for _, f := range kv.sstables {
 		_ = f.Close()
 	}
-	kv.main = nil
+	kv.sstables = nil
 	kv.meta.Close()
 	if kv.log != nil {
 		err := kv.log.close()
@@ -105,12 +105,11 @@ func (kv *KV) Close() error {
 	return nil
 }
 
-// buildLevels returns all levels in merge order: mem first, then main (newest first).
-// Callers use this for Seek/Iter over the logical merged view.
+// buildLevels returns all levels in merge order: mem first, then sstables (newest first).
 func (kv *KV) buildLevels() MergedSortedKV {
-	levels := make(MergedSortedKV, 0, 1+len(kv.main))
+	levels := make(MergedSortedKV, 0, 1+len(kv.sstables))
 	levels = append(levels, kv.mem)
-	for _, f := range kv.main {
+	for _, f := range kv.sstables {
 		levels = append(levels, f)
 	}
 	return levels
@@ -172,7 +171,7 @@ func (kv *KV) Del(key []byte) (updated bool, err error) {
 	return true, nil
 }
 
-// Compact flushes the MemTable if it exceeds LogThreshold, then merges adjacent
+// Compact flushes the MemTable if it exceeds logThreshold, then merges adjacent
 // SSTables when shouldMerge(i) is true (cur*growthFactor >= cur+next).
 func (kv *KV) Compact() error {
 	if kv.mem.Size() >= kv.logThreshold {
@@ -180,12 +179,12 @@ func (kv *KV) Compact() error {
 			return err
 		}
 	}
-	for i := 0; i < len(kv.main)-1; i++ {
+	for i := 0; i < len(kv.sstables)-1; i++ {
 		if kv.shouldMerge(i) {
 			if err := kv.compactSSTable(i); err != nil {
 				return err
 			}
-			i--
+			i-- // re-check index i after merging (two levels became one)
 			continue
 		}
 	}
@@ -193,12 +192,12 @@ func (kv *KV) Compact() error {
 }
 
 func (kv *KV) shouldMerge(idx int) bool {
-	cur := kv.main[idx].EstimatedSize()
-	next := kv.main[idx+1].EstimatedSize()
+	cur := kv.sstables[idx].EstimatedSize()
+	next := kv.sstables[idx+1].EstimatedSize()
 	return float32(cur)*kv.growthFactor >= float32(cur+next)
 }
 
-// createSSTableFromSource writes source to a new SSTable file and opens it. Caller must remove fpath on error.
+// createSSTableFromSource writes source to a new SSTable file and opens it. Removes the file on error.
 func (kv *KV) createSSTableFromSource(name string, source SortedKV) (*SortedFile, error) {
 	fpath := filepath.Join(kv.dir, name)
 	sf := &SortedFile{FileName: fpath}
@@ -219,7 +218,7 @@ func (kv *KV) compactLog() error {
 	meta.Version++
 	name := fmt.Sprintf("sstable_%d", meta.Version)
 	source := SortedKV(kv.mem)
-	if len(kv.main) == 0 {
+	if len(kv.sstables) == 0 {
 		source = NoDeletedSortedKV{source}
 	}
 	sf, err := kv.createSSTableFromSource(name, source)
@@ -231,19 +230,19 @@ func (kv *KV) compactLog() error {
 		sf.Close()
 		return err
 	}
-	kv.main = append([]*SortedFile{sf}, kv.main...)
+	kv.sstables = append([]*SortedFile{sf}, kv.sstables...)
 	kv.mem.Clear()
 	return kv.log.reset()
 }
 
-// compactSSTable merges main[level] and main[level+1] into one SSTable and replaces them.
+// compactSSTable merges sstables[level] and sstables[level+1] into one SSTable and replaces them.
 func (kv *KV) compactSSTable(level int) error {
 	meta := kv.meta.Get()
 	meta.Version++
 	name := fmt.Sprintf("sstable_%d", meta.Version)
-	merged := MergedSortedKV{kv.main[level], kv.main[level+1]}
+	merged := MergedSortedKV{kv.sstables[level], kv.sstables[level+1]}
 	source := SortedKV(merged)
-	if len(kv.main) == level+2 {
+	if len(kv.sstables) == level+2 {
 		source = NoDeletedSortedKV{source}
 	}
 	sf, err := kv.createSSTableFromSource(name, source)
@@ -255,8 +254,8 @@ func (kv *KV) compactSSTable(level int) error {
 		sf.Close()
 		return err
 	}
-	old1, old2 := kv.main[level], kv.main[level+1]
-	kv.main = slices.Replace(kv.main, level, level+2, sf)
+	old1, old2 := kv.sstables[level], kv.sstables[level+1]
+	kv.sstables = slices.Replace(kv.sstables, level, level+2, sf)
 	old1.Close()
 	old2.Close()
 	os.Remove(old1.FileName)

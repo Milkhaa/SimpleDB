@@ -2,7 +2,9 @@ package engine
 
 import "bytes"
 
-// SortedKV is a key-sorted sequence of key-value pairs (MemTable snapshot or SSTable).
+// SortedKV is the common abstraction for the in-memory table (SortedArray) and
+// on-disk SSTables (SortedFile). Level 0 is the newest; for duplicate keys the
+// earliest level wins. MergedSortedKV merges multiple levels for reads.
 type SortedKV interface {
 	EstimatedSize() int
 	Iter() (SortedKVIter, error)

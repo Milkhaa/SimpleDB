@@ -6,15 +6,16 @@ import (
 	"os"
 )
 
-const sortedFileEntryHeader = 4 + 4 + 1 // keyLen, valLen, deleted
+// SSTable file layout: 8-byte key count, N×8-byte start offsets, then N entries.
+// Each entry: keyLen(4) + valLen(4) + deleted(1) + key bytes + val bytes.
+const sortedFileEntryHeader = 4 + 4 + 1
 
 // SortedFile is an immutable on-disk sorted key-value file (SSTable).
-// Layout: 8-byte key count, N×8-byte offsets, then N entries (each 4+4+1 + key + val).
 type SortedFile struct {
 	FileName string
 	fp       *os.File
 	nkeys    int
-	offsets  []uint64
+	offsets  []uint64 // start offset of each entry in the file
 }
 
 // Close closes the file. Safe to call multiple times.
@@ -204,7 +205,7 @@ func (f *SortedFile) CreateFromSorted(kv SortedKV) error {
 			return err
 		}
 	}
-	// Write header: count then n offsets
+	// Phase 1: write header (count + offsets)
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(len(offsets)-1))
 	if _, err := fp.Write(buf); err != nil {
@@ -216,7 +217,7 @@ func (f *SortedFile) CreateFromSorted(kv SortedKV) error {
 			return err
 		}
 	}
-	// Write entries
+	// Phase 2: write entries (header + key + val for each)
 	iter, _ = kv.Iter()
 	for iter.Valid() {
 		k, v := iter.Key(), iter.Val()

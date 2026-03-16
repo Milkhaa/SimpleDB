@@ -22,8 +22,9 @@ type metaSlot struct {
 	data KVMetaData
 }
 
-// KVMetaStore persists metadata with double-buffering (two slots, alternate writes).
-// Slot data is cached after Open and after Set so Get/current do not read from disk.
+// KVMetaStore persists metadata with double-buffering: two files (meta0, meta1),
+// alternate writes so we always have one valid copy; Get returns the slot with
+// the higher version. Cached after Open and Set so we do not read from disk on Get.
 type KVMetaStore struct {
 	slots [2]metaSlot
 }

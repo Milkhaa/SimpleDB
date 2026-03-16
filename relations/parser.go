@@ -7,6 +7,11 @@ import (
 	"unicode"
 )
 
+// parser.go implements a SQL-like parser. ParseStmt(s) parses one statement;
+// the string must end with ';'. Returns an opaque stmt value for ExecStmt.
+// Statement structs (stmtCreateTable, stmtSelect, etc.) are in this file;
+// execution is in exec.go.
+//
 // parser parses SQL-like statements.
 type parser struct {
 	s string

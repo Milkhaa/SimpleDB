@@ -2,7 +2,9 @@ package relations
 
 import "fmt"
 
-// Row is a slice of cells, one per column in schema order.
+// Row is one table row: a slice of cells, one per column in schema order.
+// Length must match len(schema.Cols). Key = tableName\0 + PK cells (PKey order);
+// value = non-PK columns in schema order (see README).
 type Row []Cell
 
 // EncodeKey encodes the table name (with trailing zero) and the primary-key cells into key bytes.

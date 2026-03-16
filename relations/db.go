@@ -7,6 +7,7 @@ import (
 	"github.com/Milkhaa/SimpleDB/engine"
 )
 
+// Schema storage key: "@schema_<tableName>". Table names must not contain null bytes.
 func schemaKey(tableName string) []byte {
 	return []byte("@schema_" + tableName)
 }
@@ -17,10 +18,13 @@ func (db *DB) ensureTables() {
 	}
 }
 
-// DB provides relational operations on top of the key-value store.
+// DB is the relational interface: it wraps the engine key-value store and a
+// per-table schema cache. Row keys are table name + primary key; row values
+// are non-primary-key columns. Schemas are persisted under schemaKey and
+// loaded on demand in GetSchema.
 type DB struct {
 	store  *engine.KV
-	tables map[string]*Schema
+	tables map[string]*Schema // cached schemas by table name
 }
 
 // Open opens or creates the database at path (directory for LSM). Schemas are loaded on demand via GetSchema.

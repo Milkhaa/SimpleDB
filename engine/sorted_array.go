@@ -5,7 +5,8 @@ import (
 	"slices"
 )
 
-// SortedArray is an in-memory sorted key-value sequence with optional tombstones (deleted).
+// SortedArray is the in-memory sorted table (MemTable): keys, values, and a
+// deleted flag per entry (tombstones). Used for WAL replay and live writes.
 type SortedArray struct {
 	keys    [][]byte
 	vals    [][]byte
