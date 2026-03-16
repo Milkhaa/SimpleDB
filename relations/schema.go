@@ -23,6 +23,16 @@ func (s *Schema) Validate() error {
 	return nil
 }
 
+// IsPKey reports whether the column at colIndex is part of the primary key.
+func (s *Schema) IsPKey(colIndex int) bool {
+	for _, idx := range s.PKey {
+		if idx == colIndex {
+			return true
+		}
+	}
+	return false
+}
+
 // NewRow returns a new Row with one Cell per column, each Cell's Type set from the schema.
 func (s *Schema) NewRow() Row {
 	row := make(Row, len(s.Cols))

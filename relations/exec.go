@@ -15,6 +15,13 @@ func columnIndex(schema *Schema, name string) int {
 	return -1
 }
 
+func oneIf(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // ExecResult is the result of executing a statement.
 type ExecResult struct {
 	Updated int
@@ -81,11 +88,7 @@ func (db *DB) execInsert(s *stmtInsert) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, err
 	}
-	n := 0
-	if updated {
-		n = 1
-	}
-	return ExecResult{Updated: n}, nil
+	return ExecResult{Updated: oneIf(updated)}, nil
 }
 
 func (db *DB) execSelect(s *stmtSelect) (ExecResult, error) {
@@ -125,7 +128,7 @@ func (db *DB) execUpdate(s *stmtUpdate) (ExecResult, error) {
 		return ExecResult{}, err
 	}
 	if !ok {
-		return ExecResult{Updated: 0}, nil
+		return ExecResult{}, nil
 	}
 	for _, nv := range s.Value {
 		i := columnIndex(schema, nv.Column)
@@ -138,11 +141,7 @@ func (db *DB) execUpdate(s *stmtUpdate) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, err
 	}
-	n := 0
-	if updated {
-		n = 1
-	}
-	return ExecResult{Updated: n}, nil
+	return ExecResult{Updated: oneIf(updated)}, nil
 }
 
 func (db *DB) execDelete(s *stmtDelete) (ExecResult, error) {
@@ -158,11 +157,7 @@ func (db *DB) execDelete(s *stmtDelete) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, err
 	}
-	n := 0
-	if deleted {
-		n = 1
-	}
-	return ExecResult{Updated: n}, nil
+	return ExecResult{Updated: oneIf(deleted)}, nil
 }
 
 func fillRowFromKeys(schema *Schema, row Row, keys []sqlNamedCell) error {

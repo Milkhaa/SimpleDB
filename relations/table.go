@@ -11,6 +11,12 @@ func schemaKey(tableName string) []byte {
 	return []byte("@schema_" + tableName)
 }
 
+func (db *DB) ensureTables() {
+	if db.tables == nil {
+		db.tables = make(map[string]*Schema)
+	}
+}
+
 // DB provides relational operations on top of the key-value store.
 type DB struct {
 	store  *engine.KV
@@ -24,9 +30,7 @@ func (db *DB) Open(path string) error {
 		return err
 	}
 	db.store = s
-	if db.tables == nil {
-		db.tables = make(map[string]*Schema)
-	}
+	db.ensureTables()
 	return nil
 }
 
@@ -48,9 +52,7 @@ func (db *DB) GetSchema(table string) (*Schema, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, err
 	}
-	if db.tables == nil {
-		db.tables = make(map[string]*Schema)
-	}
+	db.ensureTables()
 	db.tables[table] = &s
 	return &s, nil
 }
@@ -65,9 +67,7 @@ func (db *DB) Schema(table string) *Schema {
 
 // SetSchema registers a schema for a table and persists it (used by SQL execution).
 func (db *DB) SetSchema(schema *Schema) error {
-	if db.tables == nil {
-		db.tables = make(map[string]*Schema)
-	}
+	db.ensureTables()
 	data, err := json.Marshal(schema)
 	if err != nil {
 		return err

@@ -27,18 +27,15 @@ func (r Row) EncodeVal(schema *Schema) ([]byte, error) {
 	if err := schema.Validate(); err != nil {
 		return nil, err
 	}
-	pkeySet := make(map[int]bool)
-	for _, idx := range schema.PKey {
-		pkeySet[idx] = true
-	}
 	var val []byte
 	for i := range schema.Cols {
-		if !pkeySet[i] {
-			if i >= len(r) {
-				return nil, fmt.Errorf("relations: column index %d out of row length %d", i, len(r))
-			}
-			val = r[i].Encode(val)
+		if schema.IsPKey(i) {
+			continue
 		}
+		if i >= len(r) {
+			return nil, fmt.Errorf("relations: column index %d out of row length %d", i, len(r))
+		}
+		val = r[i].Encode(val)
 	}
 	return val, nil
 }
@@ -80,13 +77,9 @@ func (r *Row) DecodeVal(schema *Schema, val []byte) error {
 	if err := schema.Validate(); err != nil {
 		return err
 	}
-	pkeySet := make(map[int]bool)
-	for _, idx := range schema.PKey {
-		pkeySet[idx] = true
-	}
 	rest := val
 	for i := range schema.Cols {
-		if pkeySet[i] {
+		if schema.IsPKey(i) {
 			continue
 		}
 		if i >= len(*r) {
