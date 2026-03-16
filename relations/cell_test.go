@@ -95,6 +95,15 @@ func TestTableCellVal(t *testing.T) {
 		assert.ErrorIs(t, err, ErrTruncatedData)
 		assert.Equal(t, short, rest)
 	})
+
+	t.Run("DecodeVal_str_huge_length_returns_error", func(t *testing.T) {
+		// Length 0xFFFFFFFF casts to -1 on 32-bit; must return error, not panic
+		malformed := []byte{0xff, 0xff, 0xff, 0xff, 'x'}
+		decoded := Cell{Type: CellTypeStr}
+		rest, err := decoded.DecodeVal(malformed)
+		assert.ErrorIs(t, err, ErrTruncatedData)
+		assert.Equal(t, malformed, rest)
+	})
 }
 
 func TestTableCellKey(t *testing.T) {

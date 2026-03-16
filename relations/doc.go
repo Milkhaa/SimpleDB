@@ -13,7 +13,7 @@
 //   - db.go      — DB type, Open/Close, GetSchema/SetSchema, Select/Insert/Update/Delete
 //   - schema.go  — Schema, Column, Validate, NewRow, IsPKey
 //   - row.go     — Row key/value encoding and decoding (EncodeKey/Val, DecodeKey/Val)
-//   - cell.go    — Cell and CellType (I64, Str), Encode/Decode
+//   - cell.go    — Cell and CellType (I64, Str), EncodeKey/DecodeKey, EncodeVal/DecodeVal
 //   - exec.go    — ExecStmt, ExecResult, and per-statement exec (create table, insert, select, update, delete)
 //   - parser.go  — SQL parser (ParseStmt), statement structs, parseCreateTable/parseSelect/...
 //   - errors.go  — Package errors

@@ -218,7 +218,10 @@ func (f *SortedFile) CreateFromSorted(kv SortedKV) error {
 		}
 	}
 	// Phase 2: write entries (header + key + val for each)
-	iter, _ = kv.Iter()
+	iter, err = kv.Iter()
+	if err != nil {
+		return err
+	}
 	for iter.Valid() {
 		k, v := iter.Key(), iter.Val()
 		h := make([]byte, sortedFileEntryHeader)

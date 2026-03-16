@@ -100,6 +100,9 @@ func (db *DB) execSelect(s *stmtSelect) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
 	}
+	if err := validateWhereIsFullPKey(schema, s.Keys); err != nil {
+		return ExecResult{}, err
+	}
 	row := schema.NewRow()
 	if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
 		return ExecResult{}, err
@@ -122,6 +125,9 @@ func (db *DB) execUpdate(s *stmtUpdate) (ExecResult, error) {
 	schema, err := db.GetSchema(s.Table)
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
+	}
+	if err := validateWhereIsFullPKey(schema, s.Keys); err != nil {
+		return ExecResult{}, err
 	}
 	row := schema.NewRow()
 	if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
@@ -153,6 +159,9 @@ func (db *DB) execDelete(s *stmtDelete) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
 	}
+	if err := validateWhereIsFullPKey(schema, s.Keys); err != nil {
+		return ExecResult{}, err
+	}
 	row := schema.NewRow()
 	if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
 		return ExecResult{}, err
@@ -162,6 +171,31 @@ func (db *DB) execDelete(s *stmtDelete) (ExecResult, error) {
 		return ExecResult{}, err
 	}
 	return ExecResult{Updated: oneIf(deleted)}, nil
+}
+
+// validateWhereIsFullPKey ensures keys specify exactly the primary key columns (no more, no less).
+// Returns an error if WHERE is partial, has extra columns, or is missing a PK column.
+func validateWhereIsFullPKey(schema *Schema, keys []sqlNamedCell) error {
+	if len(keys) != len(schema.PKey) {
+		return fmt.Errorf("WHERE must specify all %d primary key column(s), got %d", len(schema.PKey), len(keys))
+	}
+	seen := make(map[string]bool)
+	for _, k := range keys {
+		if columnIndex(schema, k.Column) < 0 {
+			return fmt.Errorf("unknown column %q", k.Column)
+		}
+		if seen[k.Column] {
+			return fmt.Errorf("duplicate column %q in WHERE", k.Column)
+		}
+		seen[k.Column] = true
+	}
+	for _, pkeyIdx := range schema.PKey {
+		name := schema.Cols[pkeyIdx].Name
+		if !seen[name] {
+			return fmt.Errorf("WHERE must include primary key column %q", name)
+		}
+	}
+	return nil
 }
 
 func fillRowFromKeys(schema *Schema, row Row, keys []sqlNamedCell) error {

@@ -153,7 +153,9 @@ func (a *SortedArray) delOrTombstone(key []byte) bool {
 	a.vals = slices.Insert(a.vals, idx, nil)
 	if a.deleted == nil {
 		a.deleted = make([]bool, len(a.keys))
+		a.deleted[idx] = true
+	} else {
+		a.deleted = slices.Insert(a.deleted, idx, true)
 	}
-	a.deleted = slices.Insert(a.deleted, idx, true)
 	return false
 }

@@ -133,7 +133,7 @@ func (c *Cell) DecodeVal(data []byte) (rest []byte, err error) {
 			return data, ErrTruncatedData
 		}
 		n := int(binary.LittleEndian.Uint32(data[:4]))
-		if len(data) < 4+n {
+		if n < 0 || len(data) < 4+n {
 			return data, ErrTruncatedData
 		}
 		c.Str = append(c.Str[:0], data[4:4+n]...)
