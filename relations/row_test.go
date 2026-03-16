@@ -22,8 +22,8 @@ func TestRowEncode(t *testing.T) {
 		Cell{Type: CellTypeStr, Str: []byte("click")},
 		Cell{Type: CellTypeStr, Str: []byte("button_a")},
 	}
-	// key: "event\0" + I64(1000) LE + len("click") LE + "click"
-	expectKey := []byte{'e', 'v', 'e', 'n', 't', 0, 0xe8, 0x03, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 'c', 'l', 'i', 'c', 'k'}
+	// key: "event\0" + I64(1000) order-preserving (BE xor sign bit) + "click\0"
+	expectKey := []byte{'e', 'v', 'e', 'n', 't', 0, 0x80, 0, 0, 0, 0, 0, 0x03, 0xe8, 'c', 'l', 'i', 'c', 'k', 0}
 	// val: len("button_a") LE + "button_a"
 	expectVal := []byte{8, 0, 0, 0, 'b', 'u', 't', 't', 'o', 'n', '_', 'a'}
 	var key, val []byte

@@ -19,7 +19,7 @@ func (r Row) EncodeKey(schema *Schema) ([]byte, error) {
 		if idx >= len(r) {
 			return nil, fmt.Errorf("relations: PKey index %d out of row length %d", idx, len(r))
 		}
-		key = r[idx].Encode(key)
+		key = r[idx].EncodeKey(key)
 	}
 	return key, nil
 }
@@ -37,7 +37,7 @@ func (r Row) EncodeVal(schema *Schema) ([]byte, error) {
 		if i >= len(r) {
 			return nil, fmt.Errorf("relations: column index %d out of row length %d", i, len(r))
 		}
-		val = r[i].Encode(val)
+		val = r[i].EncodeVal(val)
 	}
 	return val, nil
 }
@@ -66,7 +66,7 @@ func (r *Row) DecodeKey(schema *Schema, key []byte) error {
 			return fmt.Errorf("relations: PKey index %d out of row length %d", idx, len(*r))
 		}
 		var err error
-		rest, err = (*r)[idx].Decode(rest)
+		rest, err = (*r)[idx].DecodeKey(rest)
 		if err != nil {
 			return err
 		}
@@ -88,7 +88,7 @@ func (r *Row) DecodeVal(schema *Schema, val []byte) error {
 			return fmt.Errorf("relations: column index %d out of row length %d", i, len(*r))
 		}
 		var err error
-		rest, err = (*r)[i].Decode(rest)
+		rest, err = (*r)[i].DecodeVal(rest)
 		if err != nil {
 			return err
 		}

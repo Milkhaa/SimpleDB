@@ -28,10 +28,12 @@ Storage is provided by `github.com/Milkhaa/SimpleDB/engine`; `DB.Open(path)` ope
 
 A **Cell** holds one value. Supported types are:
 
-| Constant      | Go type | Encoding                          |
-| ------------- | ------- | --------------------------------- |
-| `CellTypeI64` | int64   | 8 bytes, little-endian            |
-| `CellTypeStr` | []byte  | 4-byte length (LE) then raw bytes  |
+| Constant      | Go type | Value encoding (EncodeVal/DecodeVal)     |
+| ------------- | ------- | ---------------------------------------- |
+| `CellTypeI64` | int64   | 8 bytes, little-endian                    |
+| `CellTypeStr` | []byte  | 4-byte length (LE) then raw bytes        |
+
+Key encoding (EncodeKey/DecodeKey) is order-preserving: I64 = XOR sign bit + big-endian; Str = null-terminated with escapes. See “Key and value layout” below.
 
 ### Schema and Column
 
@@ -42,8 +44,8 @@ A **Cell** holds one value. Supported types are:
 
 **Row** is `[]Cell`, one cell per column in schema order.
 
-- **EncodeKey(schema)** — Key bytes: `tableName + 0x00` then encoded primary-key cells in **PKey** order.
-- **EncodeVal(schema)** — Value bytes: encoded non-primary-key columns in schema order.
+- **EncodeKey(schema)** — Key bytes: `tableName + 0x00` then **order-preserving** encoded primary-key cells (Cell.EncodeKey) in **PKey** order.
+- **EncodeVal(schema)** — Value bytes: encoded non-primary-key columns (Cell.EncodeVal) in schema order.
 - **DecodeKey(schema, key)** — Fills the primary-key cells of the row from `key` (skips table name up to the null terminator). Other cells unchanged.
 - **DecodeVal(schema, val)** — Fills the non-primary-key cells from `val`.
 
@@ -106,10 +108,16 @@ r, _ := db.ExecStmt(stmt)
 
 ## Key and value layout
 
-- **Key:** `tableName` (no length prefix) + single null byte `0x00` + encoded key columns in the order given by `schema.PKey`. Table names must not contain the null byte.
-- **Value:** Encoded value columns only (all columns not in `PKey`), in schema order.
+- **Key:** `tableName` (no length prefix) + single null byte `0x00` + **order-preserving** encoded key columns (EncodeKey) in `schema.PKey` order. Table names must not contain the null byte.
+- **Value:** Encoded value columns only (EncodeVal: non-PKey columns in schema order).
 
-Cell encoding is the same in keys and values: I64 as 8-byte LE, Str as 4-byte length (LE) then bytes.
+**Key encoding (order-preserving for bytes.Compare):**
+- **I64:** Remap int64 so byte order matches sort order: XOR with `1<<63`, then 8 bytes **big-endian**. So negative &lt; zero &lt; positive.
+- **Str:** Null-terminated (append `0x00`). Bytes `0x00` and `0x01` are escaped: `0x00` → `0x01 0x01`, `0x01` → `0x01 0x02`. Lexicographic order is preserved.
+
+**Value encoding (compact, not order-preserving):**
+- **I64:** 8 bytes little-endian.
+- **Str:** 4-byte length (LE) then raw bytes.
 
 ---
 
