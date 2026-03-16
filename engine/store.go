@@ -198,23 +198,32 @@ func (kv *KV) shouldMerge(idx int) bool {
 	return float32(cur)*kv.growthFactor >= float32(cur+next)
 }
 
+// createSSTableFromSource writes source to a new SSTable file and opens it. Caller must remove fpath on error.
+func (kv *KV) createSSTableFromSource(name string, source SortedKV) (*SortedFile, error) {
+	fpath := filepath.Join(kv.dir, name)
+	sf := &SortedFile{FileName: fpath}
+	if err := sf.CreateFromSorted(source); err != nil {
+		os.Remove(fpath)
+		return nil, err
+	}
+	if err := sf.Open(); err != nil {
+		os.Remove(fpath)
+		return nil, err
+	}
+	return sf, nil
+}
+
 // compactLog flushes the MemTable to a new SSTable, clears mem, and resets the WAL.
 func (kv *KV) compactLog() error {
 	meta := kv.meta.Get()
 	meta.Version++
 	name := fmt.Sprintf("sstable_%d", meta.Version)
-	fpath := filepath.Join(kv.dir, name)
-	sf := &SortedFile{FileName: fpath}
-	var source SortedKV = kv.mem
+	source := SortedKV(kv.mem)
 	if len(kv.main) == 0 {
 		source = NoDeletedSortedKV{source}
 	}
-	if err := sf.CreateFromSorted(source); err != nil {
-		os.Remove(fpath)
-		return err
-	}
-	if err := sf.Open(); err != nil {
-		os.Remove(fpath)
+	sf, err := kv.createSSTableFromSource(name, source)
+	if err != nil {
 		return err
 	}
 	meta.SSTables = append([]string{name}, meta.SSTables...)
@@ -232,19 +241,13 @@ func (kv *KV) compactSSTable(level int) error {
 	meta := kv.meta.Get()
 	meta.Version++
 	name := fmt.Sprintf("sstable_%d", meta.Version)
-	fpath := filepath.Join(kv.dir, name)
-	sf := &SortedFile{FileName: fpath}
 	merged := MergedSortedKV{kv.main[level], kv.main[level+1]}
-	var source SortedKV = merged
+	source := SortedKV(merged)
 	if len(kv.main) == level+2 {
 		source = NoDeletedSortedKV{source}
 	}
-	if err := sf.CreateFromSorted(source); err != nil {
-		os.Remove(fpath)
-		return err
-	}
-	if err := sf.Open(); err != nil {
-		os.Remove(fpath)
+	sf, err := kv.createSSTableFromSource(name, source)
+	if err != nil {
 		return err
 	}
 	meta.SSTables = slices.Replace(meta.SSTables, level, level+2, name)

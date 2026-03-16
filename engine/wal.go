@@ -13,16 +13,12 @@ type wal struct {
 }
 
 func (w *wal) open(path string) error {
-	var err error
 	w.path = path
-	w.file, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	fp, err := openFileSync(path)
 	if err != nil {
 		return err
 	}
-	if err := syncDir(path); err != nil {
-		_ = w.file.Close()
-		return err
-	}
+	w.file = fp
 	return nil
 }
 
