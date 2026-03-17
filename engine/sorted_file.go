@@ -11,6 +11,14 @@ import (
 // Each entry: keyLen(4) + valLen(4) + deleted(1) + key bytes + val bytes.
 const sortedFileEntryHeader = 4 + 4 + 1
 
+// checkEntryLengths returns an error if key or value length cannot be stored in the entry header (uint32).
+func checkEntryLengths(keyLen, valueLen int) error {
+	if keyLen > math.MaxUint32 || valueLen > math.MaxUint32 {
+		return ErrKeyOrValueTooLarge
+	}
+	return nil
+}
+
 // SortedFile is an immutable on-disk sorted key-value file (SSTable).
 type SortedFile struct {
 	FileName string
@@ -254,6 +262,9 @@ func (f *SortedFile) CreateFromSorted(kv SortedKV) error {
 	}
 	for iter.Valid() {
 		k, v := iter.Key(), iter.Val()
+		if err := checkEntryLengths(len(k), len(v)); err != nil {
+			return err
+		}
 		h := make([]byte, sortedFileEntryHeader)
 		binary.LittleEndian.PutUint32(h[0:4], uint32(len(k)))
 		binary.LittleEndian.PutUint32(h[4:8], uint32(len(v)))
