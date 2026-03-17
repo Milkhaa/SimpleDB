@@ -8,8 +8,7 @@ import (
 )
 
 // wal is the write-ahead log: append-only, each append is fsynced for durability.
-// Record format is in record.go. createFileSync/openFileSync sync the directory
-// after creating/opening so new files survive crash (Unix).
+// Record format is in record.go.
 type wal struct {
 	path string
 	file *os.File
@@ -69,6 +68,8 @@ func (w *wal) read(rec *record) (done bool, err error) {
 	return false, nil
 }
 
+// createFileSync creates a new file (truncates if it exists) and syncs the directory.
+// Use for writing new files from scratch (e.g. a new SSTable). On dir-sync failure, removes the file.
 func createFileSync(filePath string) (*os.File, error) {
 	f, err := os.Create(filePath)
 	if err != nil {
@@ -82,6 +83,8 @@ func createFileSync(filePath string) (*os.File, error) {
 	return f, nil
 }
 
+// openFileSync opens a file for read/write, creating it only if it does not exist (no truncation).
+// Use when the file may already exist and must be preserved (e.g. WAL, metadata). Syncs the directory so the new file survives crash.
 func openFileSync(filePath string) (*os.File, error) {
 	f, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
