@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"encoding/binary"
+	"math"
 	"os"
 )
 
@@ -16,6 +17,7 @@ type SortedFile struct {
 	fp       *os.File
 	nkeys    int
 	offsets  []uint64 // start offset of each entry in the file
+	fileSize int64    // file size at Open, used to validate entry lengths
 }
 
 // Close closes the file. Safe to call multiple times.
@@ -37,12 +39,28 @@ func (f *SortedFile) Open() error {
 	if err != nil {
 		return err
 	}
+	fi, err := fp.Stat()
+	if err != nil {
+		fp.Close()
+		return err
+	}
+	fileSize := fi.Size()
 	buf := make([]byte, 8)
 	if _, err := fp.ReadAt(buf, 0); err != nil {
 		fp.Close()
 		return err
 	}
-	n := int(binary.LittleEndian.Uint64(buf))
+	n64 := binary.LittleEndian.Uint64(buf)
+	if n64 > math.MaxInt {
+		fp.Close()
+		return ErrCorruptSSTable
+	}
+	n := int(n64)
+	headerSize := 8 + int64(n)*8
+	if headerSize > fileSize {
+		fp.Close()
+		return ErrCorruptSSTable
+	}
 	offsets := make([]uint64, n)
 	for i := 0; i < n; i++ {
 		if _, err := fp.ReadAt(buf, 8+int64(i)*8); err != nil {
@@ -54,6 +72,7 @@ func (f *SortedFile) Open() error {
 	f.fp = fp
 	f.nkeys = n
 	f.offsets = offsets
+	f.fileSize = fileSize
 	return nil
 }
 
@@ -65,6 +84,10 @@ func (f *SortedFile) readEntry(pos int) (key, val []byte, deleted bool, err erro
 		return nil, nil, false, nil
 	}
 	off := f.offsets[pos]
+	remaining := f.fileSize - int64(off) - sortedFileEntryHeader
+	if remaining < 0 {
+		return nil, nil, false, ErrCorruptSSTable
+	}
 	h := make([]byte, sortedFileEntryHeader)
 	if _, err := f.fp.ReadAt(h, int64(off)); err != nil {
 		return nil, nil, false, err
@@ -72,7 +95,11 @@ func (f *SortedFile) readEntry(pos int) (key, val []byte, deleted bool, err erro
 	klen := binary.LittleEndian.Uint32(h[0:4])
 	vlen := binary.LittleEndian.Uint32(h[4:8])
 	deleted = h[8] != 0
-	kv := make([]byte, klen+vlen)
+	total := int64(klen) + int64(vlen)
+	if total < 0 || total > remaining || total > math.MaxInt {
+		return nil, nil, false, ErrCorruptSSTable
+	}
+	kv := make([]byte, int(total))
 	if _, err := f.fp.ReadAt(kv, int64(off)+sortedFileEntryHeader); err != nil {
 		return nil, nil, false, err
 	}
@@ -104,7 +131,10 @@ func (f *SortedFile) Seek(key []byte) (SortedKVIter, error) {
 			return nil, err
 		}
 	}
-	pos := f.findPos(key)
+	pos, err := f.findPos(key)
+	if err != nil {
+		return nil, err
+	}
 	it := &sortedFileIter{file: f, pos: pos}
 	if pos >= 0 && pos < f.nkeys {
 		k, v, d, err := f.readEntry(pos)
@@ -118,13 +148,13 @@ func (f *SortedFile) Seek(key []byte) (SortedKVIter, error) {
 	return it, nil
 }
 
-func (f *SortedFile) findPos(target []byte) int {
+func (f *SortedFile) findPos(target []byte) (int, error) {
 	lo, hi := 0, f.nkeys
 	for lo < hi {
 		mid := lo + (hi-lo)/2
 		key, _, _, err := f.readEntry(mid)
 		if err != nil {
-			return -1
+			return -1, err
 		}
 		r := bytes.Compare(target, key)
 		if r > 0 {
@@ -132,10 +162,10 @@ func (f *SortedFile) findPos(target []byte) int {
 		} else if r < 0 {
 			hi = mid
 		} else {
-			return mid
+			return mid, nil
 		}
 	}
-	return lo
+	return lo, nil
 }
 
 type sortedFileIter struct {
