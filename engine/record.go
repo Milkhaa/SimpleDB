@@ -1,4 +1,4 @@
-package simpledb
+package engine
 
 import (
 	"encoding/binary"
@@ -6,25 +6,25 @@ import (
 	"io"
 )
 
-// Log record layout (see README):
+// WAL record layout (one record per Set/Del in the write-ahead log):
 //
 //	crc32(4) | keyLen(4) | valLen(4) | deleted(1) | key | val
+//
+// Checksum covers everything after the first 4 bytes; used to detect partial writes on replay.
 const (
-	recordHeaderSize = 4 + 4 + 4 + 1 // crc32 + keyLen + valLen + deleted
+	recordHeaderSize = 4 + 4 + 4 + 1
 	checksumSize     = 4
 	keyLenOffset     = 4
 	valLenOffset     = 8
 	deletedOffset    = 12
 )
 
-// record represents a single WAL entry: a key, optional value, and tombstone flag.
 type record struct {
 	key     []byte
 	val     []byte
 	deleted bool
 }
 
-// encode serializes the record with a leading CRC32 for atomicity (detect incomplete writes).
 func (r *record) encode() ([]byte, error) {
 	buf := make([]byte, recordHeaderSize)
 	binary.LittleEndian.PutUint32(buf[keyLenOffset:], uint32(len(r.key)))
@@ -41,7 +41,6 @@ func (r *record) encode() ([]byte, error) {
 	return buf, nil
 }
 
-// decode reads one record from rd. Returns ErrBadChecksum if the stored checksum does not match.
 func (r *record) decode(rd io.Reader) error {
 	var header [recordHeaderSize]byte
 	if _, err := io.ReadFull(rd, header[:]); err != nil {

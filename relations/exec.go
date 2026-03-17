@@ -1,17 +1,38 @@
-package simpledb
+package relations
 
 import (
 	"errors"
 	"fmt"
 )
 
-// ExecResult is the result of executing a statement.
-type ExecResult struct {
-	Updated int
-	Values  []Row
+// exec.go implements the SQL executor: ExecStmt dispatches to execCreateTable,
+// execInsert, execSelect, execUpdate, or execDelete. Helper functions
+// (columnIndex, fillRowFromKeys, projectRow) are used by the exec functions.
+
+// columnIndex returns the index of the schema column with the given name, or -1 if not found.
+func columnIndex(schema *Schema, name string) int {
+	for i, c := range schema.Cols {
+		if c.Name == name {
+			return i
+		}
+	}
+	return -1
 }
 
-// ExecStmt executes a parsed statement.
+func oneIf(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// ExecResult is the result of executing a statement.
+type ExecResult struct {
+	Updated int   // rows affected for insert/update/delete
+	Values  []Row // result rows for select
+}
+
+// ExecStmt executes a parsed statement (value returned by ParseStmt).
 func (db *DB) ExecStmt(stmt interface{}) (ExecResult, error) {
 	switch s := stmt.(type) {
 	case *stmtCreateTable:
@@ -35,17 +56,11 @@ func (db *DB) execCreateTable(s *stmtCreateTable) (ExecResult, error) {
 	}
 	pkeyIdx := make([]int, 0, len(s.Pkey))
 	for _, name := range s.Pkey {
-		found := false
-		for i, c := range s.Cols {
-			if c.Name == name {
-				pkeyIdx = append(pkeyIdx, i)
-				found = true
-				break
-			}
-		}
-		if !found {
+		i := columnIndex(&Schema{Cols: s.Cols}, name)
+		if i < 0 {
 			return ExecResult{}, fmt.Errorf("primary key column %q not found in table columns", name)
 		}
+		pkeyIdx = append(pkeyIdx, i)
 	}
 	schema := &Schema{
 		Table: s.Table,
@@ -77,17 +92,16 @@ func (db *DB) execInsert(s *stmtInsert) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, err
 	}
-	n := 0
-	if updated {
-		n = 1
-	}
-	return ExecResult{Updated: n}, nil
+	return ExecResult{Updated: oneIf(updated)}, nil
 }
 
 func (db *DB) execSelect(s *stmtSelect) (ExecResult, error) {
 	schema, err := db.GetSchema(s.Table)
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
+	}
+	if err := validateWhereIsFullPKey(schema, s.Keys); err != nil {
+		return ExecResult{}, err
 	}
 	row := schema.NewRow()
 	if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
@@ -112,6 +126,9 @@ func (db *DB) execUpdate(s *stmtUpdate) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
 	}
+	if err := validateWhereIsFullPKey(schema, s.Keys); err != nil {
+		return ExecResult{}, err
+	}
 	row := schema.NewRow()
 	if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
 		return ExecResult{}, err
@@ -121,36 +138,29 @@ func (db *DB) execUpdate(s *stmtUpdate) (ExecResult, error) {
 		return ExecResult{}, err
 	}
 	if !ok {
-		return ExecResult{Updated: 0}, nil
+		return ExecResult{}, nil
 	}
 	for _, nv := range s.Value {
-		found := false
-		for i, c := range schema.Cols {
-			if c.Name == nv.Column {
-				row[i] = nv.Value
-				found = true
-				break
-			}
-		}
-		if !found {
+		i := columnIndex(schema, nv.Column)
+		if i < 0 {
 			return ExecResult{}, fmt.Errorf("unknown column %q", nv.Column)
 		}
+		row[i] = nv.Value
 	}
 	updated, err := db.Update(schema, row)
 	if err != nil {
 		return ExecResult{}, err
 	}
-	n := 0
-	if updated {
-		n = 1
-	}
-	return ExecResult{Updated: n}, nil
+	return ExecResult{Updated: oneIf(updated)}, nil
 }
 
 func (db *DB) execDelete(s *stmtDelete) (ExecResult, error) {
 	schema, err := db.GetSchema(s.Table)
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
+	}
+	if err := validateWhereIsFullPKey(schema, s.Keys); err != nil {
+		return ExecResult{}, err
 	}
 	row := schema.NewRow()
 	if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
@@ -160,26 +170,41 @@ func (db *DB) execDelete(s *stmtDelete) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, err
 	}
-	n := 0
-	if deleted {
-		n = 1
+	return ExecResult{Updated: oneIf(deleted)}, nil
+}
+
+// validateWhereIsFullPKey ensures keys specify exactly the primary key columns (no more, no less).
+// Returns an error if WHERE is partial, has extra columns, or is missing a PK column.
+func validateWhereIsFullPKey(schema *Schema, keys []sqlNamedCell) error {
+	if len(keys) != len(schema.PKey) {
+		return fmt.Errorf("WHERE must specify all %d primary key column(s), got %d", len(schema.PKey), len(keys))
 	}
-	return ExecResult{Updated: n}, nil
+	seen := make(map[string]bool)
+	for _, k := range keys {
+		if columnIndex(schema, k.Column) < 0 {
+			return fmt.Errorf("unknown column %q", k.Column)
+		}
+		if seen[k.Column] {
+			return fmt.Errorf("duplicate column %q in WHERE", k.Column)
+		}
+		seen[k.Column] = true
+	}
+	for _, pkeyIdx := range schema.PKey {
+		name := schema.Cols[pkeyIdx].Name
+		if !seen[name] {
+			return fmt.Errorf("WHERE must include primary key column %q", name)
+		}
+	}
+	return nil
 }
 
 func fillRowFromKeys(schema *Schema, row Row, keys []sqlNamedCell) error {
 	for _, k := range keys {
-		found := false
-		for i, c := range schema.Cols {
-			if c.Name == k.Column {
-				row[i] = k.Value
-				found = true
-				break
-			}
-		}
-		if !found {
+		i := columnIndex(schema, k.Column)
+		if i < 0 {
 			return fmt.Errorf("unknown column %q", k.Column)
 		}
+		row[i] = k.Value
 	}
 	return nil
 }
@@ -187,17 +212,11 @@ func fillRowFromKeys(schema *Schema, row Row, keys []sqlNamedCell) error {
 func projectRow(schema *Schema, row Row, cols []string) (Row, error) {
 	out := make(Row, len(cols))
 	for j, name := range cols {
-		found := false
-		for i, c := range schema.Cols {
-			if c.Name == name {
-				out[j] = row[i]
-				found = true
-				break
-			}
-		}
-		if !found {
+		i := columnIndex(schema, name)
+		if i < 0 {
 			return nil, fmt.Errorf("unknown column %q", name)
 		}
+		out[j] = row[i]
 	}
 	return out, nil
 }

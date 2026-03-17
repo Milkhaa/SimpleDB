@@ -1,32 +1,40 @@
-package simpledb
+package relations
 
 import (
 	"encoding/json"
 	"errors"
 
-	kv "github.com/Milkhaa/SimpleDB"
+	"github.com/Milkhaa/SimpleDB/engine"
 )
 
+// Schema storage key: "@schema_<tableName>". Table names must not contain null bytes.
 func schemaKey(tableName string) []byte {
 	return []byte("@schema_" + tableName)
 }
 
-// DB provides relational operations on top of the key-value store.
-type DB struct {
-	store  *kv.Store
-	tables map[string]*Schema
+func (db *DB) ensureTables() {
+	if db.tables == nil {
+		db.tables = make(map[string]*Schema)
+	}
 }
 
-// Open opens or creates the database at path (WAL file path). Schemas are loaded on demand via GetSchema.
+// DB is the relational interface: it wraps the engine key-value store and a
+// per-table schema cache. Row keys are table name + primary key; row values
+// are non-primary-key columns. Schemas are persisted under schemaKey and
+// loaded on demand in GetSchema.
+type DB struct {
+	store  *engine.KV
+	tables map[string]*Schema // cached schemas by table name
+}
+
+// Open opens or creates the database at path (directory for LSM). Schemas are loaded on demand via GetSchema.
 func (db *DB) Open(path string) error {
-	s, err := kv.Open(kv.Config{Path: path})
+	s, err := engine.Open(engine.Config{Path: path})
 	if err != nil {
 		return err
 	}
 	db.store = s
-	if db.tables == nil {
-		db.tables = make(map[string]*Schema)
-	}
+	db.ensureTables()
 	return nil
 }
 
@@ -48,9 +56,7 @@ func (db *DB) GetSchema(table string) (*Schema, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, err
 	}
-	if db.tables == nil {
-		db.tables = make(map[string]*Schema)
-	}
+	db.ensureTables()
 	db.tables[table] = &s
 	return &s, nil
 }
@@ -65,9 +71,7 @@ func (db *DB) Schema(table string) *Schema {
 
 // SetSchema registers a schema for a table and persists it (used by SQL execution).
 func (db *DB) SetSchema(schema *Schema) error {
-	if db.tables == nil {
-		db.tables = make(map[string]*Schema)
-	}
+	db.ensureTables()
 	data, err := json.Marshal(schema)
 	if err != nil {
 		return err
