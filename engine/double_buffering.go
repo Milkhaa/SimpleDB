@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 )
 
-// KVMetaData holds LSM metadata: version and list of SSTable filenames.
+// KVMetaData holds LSM metadata: a version and the list of SSTable filenames.
 type KVMetaData struct {
-	Version  uint64
-	SSTables []string
+	Version uint64
+	// SSTableFiles are filenames (not full paths) under the DB directory.
+	// Order is newest-first (same order as the in-memory `KV.sstables` slice).
+	SSTableFiles []string
 }
 
 // metaSlot holds an open meta file and its cached data.

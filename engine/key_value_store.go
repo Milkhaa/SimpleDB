@@ -46,21 +46,30 @@ func Open(cfg Config) (*KV, error) {
 	return kv, nil
 }
 
-// openAll creates the directory, opens metadata and WAL, replays the WAL into
-// the MemTable, then opens all SSTables listed in metadata (newest first).
+// openAll initializes storage and loads persisted state.
+//
+// MkdirAll does NOT delete existing data: if the directory already exists, it is left intact.
+// Startup sequence:
+// - Ensure db directory exists
+// - Open metadata (create if missing) and read the latest meta slot
+// - Open WAL (create if missing) and replay records into the MemTable
+// - Open all SSTables listed in metadata (newest first)
 func (kv *KV) openAll() error {
 	if err := os.MkdirAll(kv.dir, 0o755); err != nil {
 		return err
 	}
+
 	if err := kv.meta.Open(kv.dir); err != nil {
 		return err
 	}
+
 	walPath := filepath.Join(kv.dir, "wal")
 	kv.log = &wal{}
 	if err := kv.log.open(walPath); err != nil {
 		kv.meta.Close()
 		return err
 	}
+
 	var rec record
 	for {
 		done, err := kv.log.read(&rec)
@@ -78,8 +87,9 @@ func (kv *KV) openAll() error {
 			kv.mem.set(rec.key, rec.val)
 		}
 	}
+
 	meta := kv.meta.Get()
-	for _, name := range meta.SSTables {
+	for _, name := range meta.SSTableFiles {
 		fpath := filepath.Join(kv.dir, name)
 		sf := &SortedFile{FileName: fpath}
 		if err := sf.Open(); err != nil {
@@ -87,6 +97,7 @@ func (kv *KV) openAll() error {
 		}
 		kv.sstables = append(kv.sstables, sf)
 	}
+
 	return nil
 }
 
@@ -225,7 +236,7 @@ func (kv *KV) compactLog() error {
 	if err != nil {
 		return err
 	}
-	meta.SSTables = append([]string{name}, meta.SSTables...)
+	meta.SSTableFiles = append([]string{name}, meta.SSTableFiles...)
 	if err := kv.meta.Set(meta); err != nil {
 		sf.Close()
 		return err
@@ -249,7 +260,7 @@ func (kv *KV) compactSSTable(level int) error {
 	if err != nil {
 		return err
 	}
-	meta.SSTables = slices.Replace(meta.SSTables, level, level+2, name)
+	meta.SSTableFiles = slices.Replace(meta.SSTableFiles, level, level+2, name)
 	if err := kv.meta.Set(meta); err != nil {
 		sf.Close()
 		return err

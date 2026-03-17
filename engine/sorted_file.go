@@ -7,8 +7,11 @@ import (
 	"os"
 )
 
-// SSTable file layout: 8-byte key count, N×8-byte start offsets, then N entries.
-// Each entry: keyLen(4) + valLen(4) + deleted(1) + key bytes + val bytes.
+// SSTable file layout (all multi-byte integers little-endian):
+//
+//	[ nkeys (8) | offset1 (8) | offset2 (8) | ... | offsetn (8) | KV1 | KV2 | ... | KVn ]
+//
+// Each KVi is: keyLen(4) + valLen(4) + deleted(1) + key bytes + val bytes.
 const sortedFileEntryHeader = 4 + 4 + 1
 
 // checkEntryLengths returns an error if key or value length cannot be stored in the entry header (uint32).
@@ -245,34 +248,39 @@ func (it *sortedFileIter) Prev() error {
 	return nil
 }
 
-// CreateFromSorted writes a SortedKV to a new file.
-func (f *SortedFile) CreateFromSorted(kv SortedKV) error {
-	fp, err := createFileSync(f.FileName)
-	if err != nil {
-		return err
-	}
-	defer fp.Close()
-
+// buildOffsets computes the start offset of each entry in the file.
+//
+// The file header contains an offsets table, so we need a first pass to compute offsets
+// before writing the header. The returned slice has length nkeys+1:
+// - offsets[0] is where the first entry starts (right after the header)
+// - offsets[i] is the start of entry i
+// - offsets[last] is the byte offset after the last entry (end sentinel)
+func buildOffsets(kv SortedKV) ([]uint64, error) {
 	n := kv.EstimatedSize()
 	headerSize := 8 + n*8
 	offsets := make([]uint64, 0, n+1)
 	offsets = append(offsets, uint64(headerSize))
+
 	iter, err := kv.Iter()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for iter.Valid() {
 		kl, vl := len(iter.Key()), len(iter.Val())
 		if err := checkEntryLengths(kl, vl); err != nil {
-			return err
+			return nil, err
 		}
 		next := offsets[len(offsets)-1] + sortedFileEntryHeader + uint64(kl) + uint64(vl)
 		offsets = append(offsets, next)
 		if err := iter.Next(); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	// Phase 1: write header (count + offsets)
+	return offsets, nil
+}
+
+func writeHeader(fp *os.File, offsets []uint64) error {
+	// Header: nkeys (uint64), then nkeys offsets (uint64 each).
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(len(offsets)-1))
 	if _, err := fp.Write(buf); err != nil {
@@ -284,8 +292,11 @@ func (f *SortedFile) CreateFromSorted(kv SortedKV) error {
 			return err
 		}
 	}
-	// Phase 2: write entries (header + key + val for each)
-	iter, err = kv.Iter()
+	return nil
+}
+
+func writeEntries(fp *os.File, kv SortedKV) error {
+	iter, err := kv.Iter()
 	if err != nil {
 		return err
 	}
@@ -313,10 +324,33 @@ func (f *SortedFile) CreateFromSorted(kv SortedKV) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// CreateFromSorted writes a SortedKV to a new file.
+func (f *SortedFile) CreateFromSorted(kv SortedKV) error {
+	fp, err := createFileSync(f.FileName)
+	if err != nil {
+		return err
+	}
+	defer fp.Close()
+
+	// We write the header before the entries, so we need a first pass to compute offsets.
+	offsets, err := buildOffsets(kv)
+	if err != nil {
+		return err
+	}
+	if err := writeHeader(fp, offsets); err != nil {
+		return err
+	}
+	if err := writeEntries(fp, kv); err != nil {
+		return err
+	}
 	if err := fp.Sync(); err != nil {
 		return err
 	}
 	f.nkeys = len(offsets) - 1
-	f.offsets = append([]uint64(nil), offsets...)
+	// Store only the nkeys entry starts; the last element of offsets is the end sentinel used only in buildOffsets.
+	f.offsets = append([]uint64(nil), offsets[:f.nkeys]...)
 	return nil
 }
