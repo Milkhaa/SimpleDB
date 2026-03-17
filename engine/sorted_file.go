@@ -64,6 +64,11 @@ func (f *SortedFile) Open() error {
 		return ErrCorruptSSTable
 	}
 	n := int(n64)
+	// Prevent int64 overflow when computing header size (8 + n*8).
+	if n64 > uint64((math.MaxInt64-8)/8) {
+		fp.Close()
+		return ErrCorruptSSTable
+	}
 	headerSize := 8 + int64(n)*8
 	if headerSize > fileSize {
 		fp.Close()
@@ -77,10 +82,32 @@ func (f *SortedFile) Open() error {
 		}
 		offsets[i] = binary.LittleEndian.Uint64(buf)
 	}
+	if err := validateOffsets(offsets, headerSize, fileSize); err != nil {
+		fp.Close()
+		return err
+	}
 	f.fp = fp
 	f.nkeys = n
 	f.offsets = offsets
 	f.fileSize = fileSize
+	return nil
+}
+
+// validateOffsets checks that all offsets lie after the header, within the file, and are strictly increasing.
+func validateOffsets(offsets []uint64, headerSize, fileSize int64) error {
+	minOff := uint64(headerSize)
+	for i, off := range offsets {
+		if off < minOff {
+			return ErrCorruptSSTable
+		}
+		if int64(off) > fileSize-int64(sortedFileEntryHeader) {
+			return ErrCorruptSSTable
+		}
+		if i > 0 && off <= offsets[i-1] {
+			return ErrCorruptSSTable
+		}
+		minOff = off
+	}
 	return nil
 }
 
@@ -150,9 +177,8 @@ func (f *SortedFile) Seek(key []byte) (SortedKVIter, error) {
 			return nil, err
 		}
 		it.key, it.val, it.deleted = k, v, d
-	} else {
-		it.pos = -1
 	}
+	// When pos == f.nkeys (past last), leave pos as-is so Prev() can step to last and Next() stays invalid.
 	return it, nil
 }
 
@@ -237,6 +263,9 @@ func (f *SortedFile) CreateFromSorted(kv SortedKV) error {
 	}
 	for iter.Valid() {
 		kl, vl := len(iter.Key()), len(iter.Val())
+		if err := checkEntryLengths(kl, vl); err != nil {
+			return err
+		}
 		next := offsets[len(offsets)-1] + sortedFileEntryHeader + uint64(kl) + uint64(vl)
 		offsets = append(offsets, next)
 		if err := iter.Next(); err != nil {
