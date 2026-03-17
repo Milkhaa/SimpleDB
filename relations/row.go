@@ -15,7 +15,7 @@ func (r Row) EncodeKey(schema *Schema) ([]byte, error) {
 	var key []byte
 	key = append(key, schema.Table...)
 	key = append(key, 0)
-	for _, idx := range schema.PKey {
+	for _, idx := range schema.PKey() {
 		if idx >= len(r) {
 			return nil, fmt.Errorf("relations: PKey index %d out of row length %d", idx, len(r))
 		}
@@ -61,7 +61,27 @@ func (r *Row) DecodeKey(schema *Schema, key []byte) error {
 	}
 	i++ // consume the 0
 	rest := key[i:]
-	for _, idx := range schema.PKey {
+	for _, idx := range schema.PKey() {
+		if idx >= len(*r) {
+			return fmt.Errorf("relations: PKey index %d out of row length %d", idx, len(*r))
+		}
+		var err error
+		rest, err = (*r)[idx].DecodeKey(rest)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DecodePKOnly decodes key bytes that are exactly the primary-key encoding (no table name)
+// into the primary-key cells of r. Used when reading PK from an index key suffix.
+func (r *Row) DecodePKOnly(schema *Schema, data []byte) error {
+	if err := schema.Validate(); err != nil {
+		return err
+	}
+	rest := data
+	for _, idx := range schema.PKey() {
 		if idx >= len(*r) {
 			return fmt.Errorf("relations: PKey index %d out of row length %d", idx, len(*r))
 		}

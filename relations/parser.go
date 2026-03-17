@@ -151,9 +151,10 @@ type stmtSelect struct {
 
 // stmtCreateTable is the parsed form of a CREATE TABLE statement.
 type stmtCreateTable struct {
-	Table string
-	Cols  []Column
-	Pkey  []string
+	Table   string
+	Cols    []Column
+	Pkey    []string
+	Indices [][]string
 }
 
 // stmtInsert is the parsed form of an INSERT statement.
@@ -245,7 +246,59 @@ func (p *parser) parseWhereKeys() ([]sqlNamedCell, error) {
 	return keys, nil
 }
 
-// parseCreateTable parses a CREATE TABLE statement (create table name (col type, ... , primary key (pkey))).
+// parseIndexClauses parses zero or more ", index (col, ...)" clauses until it consumes the closing ')'.
+// On success, the parser position is just after ')'.
+func (p *parser) parseIndexClauses() ([][]string, error) {
+	var indices [][]string
+	for {
+		p.skipSpace()
+		if p.i >= len(p.s) {
+			return nil, errInvalidValue
+		}
+		if p.s[p.i] == ')' {
+			p.i++
+			return indices, nil
+		}
+		if p.s[p.i] != ',' {
+			return nil, errInvalidValue
+		}
+		p.i++
+		p.skipSpace()
+		if !p.tryKeyword("index") {
+			return nil, errInvalidValue
+		}
+		p.skipSpace()
+		if p.i >= len(p.s) || p.s[p.i] != '(' {
+			return nil, errInvalidValue
+		}
+		p.i++
+		p.skipSpace()
+		var idxCols []string
+		for {
+			name, ok := p.tryName()
+			if !ok {
+				return nil, errInvalidValue
+			}
+			idxCols = append(idxCols, name)
+			p.skipSpace()
+			if p.i < len(p.s) && p.s[p.i] == ',' {
+				p.i++
+				p.skipSpace()
+				continue
+			}
+			break
+		}
+		if p.i >= len(p.s) || p.s[p.i] != ')' {
+			return nil, errInvalidValue
+		}
+		p.i++
+		indices = append(indices, idxCols)
+	}
+}
+
+// parseCreateTable parses a CREATE TABLE statement:
+//
+//	create table name (col type, ... , primary key (pkey1, ...)[, index (col1, ...)]...);
 func (p *parser) parseCreateTable() (*stmtCreateTable, error) {
 	if !p.tryKeyword("create", "table") {
 		return nil, errInvalidValue
@@ -313,11 +366,11 @@ func (p *parser) parseCreateTable() (*stmtCreateTable, error) {
 	}
 	p.i++
 	p.skipSpace()
-	if p.i >= len(p.s) || p.s[p.i] != ')' {
-		return nil, errInvalidValue
+	indices, err := p.parseIndexClauses()
+	if err != nil {
+		return nil, err
 	}
-	p.i++
-	return &stmtCreateTable{Table: table, Cols: cols, Pkey: pkey}, nil
+	return &stmtCreateTable{Table: table, Cols: cols, Pkey: pkey, Indices: indices}, nil
 }
 
 // parseInsert parses an INSERT statement (insert into table values (val, ...)).

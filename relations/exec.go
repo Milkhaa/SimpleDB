@@ -6,8 +6,9 @@ import (
 )
 
 // exec.go implements the SQL executor: ExecStmt dispatches to execCreateTable,
-// execInsert, execSelect, execUpdate, or execDelete. Helper functions
-// (columnIndex, fillRowFromKeys, projectRow) are used by the exec functions.
+// execInsert, execSelect, execUpdate, or execDelete. WHERE validation and
+// index matching for SELECT are in query_planner.go. Helpers here:
+// columnIndex, fillRowFromKeys, projectRow.
 
 // columnIndex returns the index of the schema column with the given name, or -1 if not found.
 func columnIndex(schema *Schema, name string) int {
@@ -54,6 +55,9 @@ func (db *DB) execCreateTable(s *stmtCreateTable) (ExecResult, error) {
 	if _, err := db.GetSchema(s.Table); err == nil {
 		return ExecResult{}, errors.New("duplicate table name")
 	}
+
+	indices := make([][]int, 0, len(s.Indices)+1)
+
 	pkeyIdx := make([]int, 0, len(s.Pkey))
 	for _, name := range s.Pkey {
 		i := columnIndex(&Schema{Cols: s.Cols}, name)
@@ -62,14 +66,27 @@ func (db *DB) execCreateTable(s *stmtCreateTable) (ExecResult, error) {
 		}
 		pkeyIdx = append(pkeyIdx, i)
 	}
+
+	indices = append(indices, pkeyIdx) // primary key index is always the first index
+
+	for _, index := range s.Indices {
+		indexIdx := make([]int, 0, len(index))
+		for _, name := range index {
+			i := columnIndex(&Schema{Cols: s.Cols}, name)
+			if i < 0 {
+				return ExecResult{}, fmt.Errorf("index column %q not found in table columns", name)
+			}
+			indexIdx = append(indexIdx, i)
+		}
+		indices = append(indices, indexIdx)
+	}
+
 	schema := &Schema{
-		Table: s.Table,
-		Cols:  s.Cols,
-		PKey:  pkeyIdx,
+		Table:   s.Table,
+		Cols:    s.Cols,
+		Indices: indices,
 	}
-	if err := schema.Validate(); err != nil {
-		return ExecResult{}, err
-	}
+
 	if err := db.SetSchema(schema); err != nil {
 		return ExecResult{}, err
 	}
@@ -100,25 +117,38 @@ func (db *DB) execSelect(s *stmtSelect) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
 	}
-	if err := validateWhereIsFullPKey(schema, s.Keys); err != nil {
+	indexID, err := matchIndexForWhere(schema, s.Keys)
+	if err != nil {
 		return ExecResult{}, err
 	}
 	row := schema.NewRow()
 	if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
 		return ExecResult{}, err
 	}
-	ok, err := db.Select(schema, row)
-	if err != nil {
-		return ExecResult{}, err
+	var rows []Row
+	if indexID == 0 {
+		ok, err := db.Select(schema, row)
+		if err != nil {
+			return ExecResult{}, err
+		}
+		if ok {
+			rows = []Row{row}
+		}
+	} else {
+		rows, err = db.SelectByIndex(schema, indexID, row)
+		if err != nil {
+			return ExecResult{}, err
+		}
 	}
-	if !ok {
-		return ExecResult{Values: []Row{}}, nil
+	var values []Row
+	for _, r := range rows {
+		out, err := projectRow(schema, r, s.Cols)
+		if err != nil {
+			return ExecResult{}, err
+		}
+		values = append(values, out)
 	}
-	out, err := projectRow(schema, row, s.Cols)
-	if err != nil {
-		return ExecResult{}, err
-	}
-	return ExecResult{Values: []Row{out}}, nil
+	return ExecResult{Values: values}, nil
 }
 
 func (db *DB) execUpdate(s *stmtUpdate) (ExecResult, error) {
@@ -126,32 +156,47 @@ func (db *DB) execUpdate(s *stmtUpdate) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
 	}
-	if err := validateWhereIsFullPKey(schema, s.Keys); err != nil {
+	indexID, err := matchIndexForWhere(schema, s.Keys)
+	if err != nil {
 		return ExecResult{}, err
 	}
 	row := schema.NewRow()
 	if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
 		return ExecResult{}, err
 	}
-	ok, err := db.Select(schema, row)
-	if err != nil {
-		return ExecResult{}, err
-	}
-	if !ok {
-		return ExecResult{}, nil
-	}
-	for _, nv := range s.Value {
-		i := columnIndex(schema, nv.Column)
-		if i < 0 {
-			return ExecResult{}, fmt.Errorf("unknown column %q", nv.Column)
+	var rows []Row
+	if indexID == 0 {
+		ok, err := db.Select(schema, row)
+		if err != nil {
+			return ExecResult{}, err
 		}
-		row[i] = nv.Value
+		if ok {
+			rows = []Row{row}
+		}
+	} else {
+		rows, err = db.SelectByIndex(schema, indexID, row)
+		if err != nil {
+			return ExecResult{}, err
+		}
 	}
-	updated, err := db.Update(schema, row)
-	if err != nil {
-		return ExecResult{}, err
+	n := 0
+	for _, r := range rows {
+		for _, nv := range s.Value {
+			i := columnIndex(schema, nv.Column)
+			if i < 0 {
+				return ExecResult{}, fmt.Errorf("unknown column %q", nv.Column)
+			}
+			r[i] = nv.Value
+		}
+		updated, err := db.Update(schema, r)
+		if err != nil {
+			return ExecResult{}, err
+		}
+		if updated {
+			n++
+		}
 	}
-	return ExecResult{Updated: oneIf(updated)}, nil
+	return ExecResult{Updated: n}, nil
 }
 
 func (db *DB) execDelete(s *stmtDelete) (ExecResult, error) {
@@ -159,43 +204,40 @@ func (db *DB) execDelete(s *stmtDelete) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
 	}
-	if err := validateWhereIsFullPKey(schema, s.Keys); err != nil {
+	indexID, err := matchIndexForWhere(schema, s.Keys)
+	if err != nil {
 		return ExecResult{}, err
 	}
 	row := schema.NewRow()
 	if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
 		return ExecResult{}, err
 	}
-	deleted, err := db.Delete(schema, row)
-	if err != nil {
-		return ExecResult{}, err
-	}
-	return ExecResult{Updated: oneIf(deleted)}, nil
-}
-
-// validateWhereIsFullPKey ensures keys specify exactly the primary key columns (no more, no less).
-// Returns an error if WHERE is partial, has extra columns, or is missing a PK column.
-func validateWhereIsFullPKey(schema *Schema, keys []sqlNamedCell) error {
-	if len(keys) != len(schema.PKey) {
-		return fmt.Errorf("WHERE must specify all %d primary key column(s), got %d", len(schema.PKey), len(keys))
-	}
-	seen := make(map[string]bool)
-	for _, k := range keys {
-		if columnIndex(schema, k.Column) < 0 {
-			return fmt.Errorf("unknown column %q", k.Column)
+	var rows []Row
+	if indexID == 0 {
+		ok, err := db.Select(schema, row)
+		if err != nil {
+			return ExecResult{}, err
 		}
-		if seen[k.Column] {
-			return fmt.Errorf("duplicate column %q in WHERE", k.Column)
+		if ok {
+			rows = []Row{row}
 		}
-		seen[k.Column] = true
-	}
-	for _, pkeyIdx := range schema.PKey {
-		name := schema.Cols[pkeyIdx].Name
-		if !seen[name] {
-			return fmt.Errorf("WHERE must include primary key column %q", name)
+	} else {
+		rows, err = db.SelectByIndex(schema, indexID, row)
+		if err != nil {
+			return ExecResult{}, err
 		}
 	}
-	return nil
+	n := 0
+	for _, r := range rows {
+		deleted, err := db.Delete(schema, r)
+		if err != nil {
+			return ExecResult{}, err
+		}
+		if deleted {
+			n++
+		}
+	}
+	return ExecResult{Updated: n}, nil
 }
 
 func fillRowFromKeys(schema *Schema, row Row, keys []sqlNamedCell) error {
