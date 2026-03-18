@@ -6,65 +6,76 @@ import (
 	"io"
 )
 
-// WAL record layout (one record per Set/Del in the write-ahead log):
-//
-//	crc32(4) | keyLen(4) | valLen(4) | deleted(1) | key | val
-//
-// Checksum covers everything after the first 4 bytes; used to detect partial writes on replay.
+type RecordOp byte
+
+// WAL record op: Add, Del, or Commit (transaction boundary).
 const (
-	recordHeaderSize = 4 + 4 + 4 + 1
-	checksumSize     = 4
-	keyLenOffset     = 4
-	valLenOffset     = 8
-	deletedOffset    = 12
+	OpAdd    RecordOp = 0
+	OpDel    RecordOp = 1
+	OpCommit RecordOp = 2
 )
 
+// record is a single WAL record. For OpCommit, key and val are unused.
 type record struct {
-	key     []byte
-	val     []byte
-	deleted bool
+	key []byte
+	val []byte
+	op  RecordOp
 }
 
+// WAL record layout (one record per Set/Del in the write-ahead log):
+//
+//	crc32(4) | keyLen(4) | valLen(4) | op(1) | key | val
+//
+// Checksum is crc32(IEEE) over (keyLen|valLen|op|key|val) and is used to
+// detect partial writes on replay.
 func (r *record) encode() ([]byte, error) {
-	buf := make([]byte, recordHeaderSize)
-	binary.LittleEndian.PutUint32(buf[keyLenOffset:], uint32(len(r.key)))
-	binary.LittleEndian.PutUint32(buf[valLenOffset:], uint32(len(r.val)))
-	if r.deleted {
-		buf[deletedOffset] = 1
-	}
-	buf = append(buf, r.key...)
-	if !r.deleted {
-		buf = append(buf, r.val...)
-	}
-	checksum := crc32.ChecksumIEEE(buf[checksumSize:])
-	binary.LittleEndian.PutUint32(buf[0:checksumSize], checksum)
-	return buf, nil
+	keyLen, valLen := len(r.key), len(r.val)
+	data := make([]byte, 4+4+4+1+keyLen+valLen)
+	// Put op after lengths (matches the requested encode layout).
+	data[4+4+4] = byte(r.op)
+	binary.LittleEndian.PutUint32(data[4:8], uint32(keyLen))
+	binary.LittleEndian.PutUint32(data[8:12], uint32(valLen))
+	copy(data[4+4+4+1:], r.key)
+	copy(data[4+4+4+1+keyLen:], r.val)
+	binary.LittleEndian.PutUint32(data[0:4], crc32.ChecksumIEEE(data[4:]))
+	return data, nil
 }
 
-func (r *record) decode(rd io.Reader) error {
-	var header [recordHeaderSize]byte
-	if _, err := io.ReadFull(rd, header[:]); err != nil {
-		return err
+// decodeFrom reads one record from rd. Returns (bytesRead, commitSeen, err). io.EOF means end of file.
+func (r *record) decodeFrom(rd io.Reader) (bytesRead int, commitSeen bool, err error) {
+	// Fixed prefix: crc32(4) | keyLen(4) | valLen(4) | op(1)
+	var header [4 + 4 + 4 + 1]byte
+	n, err := io.ReadFull(rd, header[:])
+	if err != nil {
+		return n, false, err
 	}
-	klen := int(binary.LittleEndian.Uint32(header[keyLenOffset:]))
-	vlen := int(binary.LittleEndian.Uint32(header[valLenOffset:]))
-	deleted := header[deletedOffset]
 
-	data := make([]byte, klen+vlen)
-	if _, err := io.ReadFull(rd, data); err != nil {
-		return err
+	stored := binary.LittleEndian.Uint32(header[0:4])
+	klen := int(binary.LittleEndian.Uint32(header[4:8]))
+	vlen := int(binary.LittleEndian.Uint32(header[8:12]))
+	r.op = RecordOp(header[12])
+
+	if r.op != OpAdd && r.op != OpDel && r.op != OpCommit {
+		return n, false, ErrBadChecksum
 	}
-	storedChecksum := binary.LittleEndian.Uint32(header[0:checksumSize])
-	computed := crc32.ChecksumIEEE(append(header[checksumSize:], data...))
-	if computed != storedChecksum {
-		return ErrBadChecksum
+
+	dataLen := klen + vlen
+	data := make([]byte, dataLen)
+	n2, err := io.ReadFull(rd, data)
+	total := n + n2
+	if err != nil {
+		return total, false, err
 	}
+
+	computed := crc32.ChecksumIEEE(append(header[4:], data...))
+	if computed != stored {
+		return total, false, ErrBadChecksum
+	}
+
 	r.key = data[:klen]
-	r.deleted = deleted != 0
-	if !r.deleted {
+	r.val = nil
+	if vlen > 0 {
 		r.val = data[klen:]
-	} else {
-		r.val = nil
 	}
-	return nil
+	return total, r.op == OpCommit, nil
 }

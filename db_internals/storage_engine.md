@@ -55,9 +55,9 @@ When the database starts, it reads the log and applies updates in order, produci
 
 **Log record layout (initial):**
 
-| key size | val size | deleted | key data | val data |
-|----------|----------|---------|----------|----------|
-| 4 bytes  | 4 bytes  | 1 byte  | ...      | ...      |
+| key size | val size | op | key data | val data |
+|----------|----------|----|----------|----------|
+| 4 bytes  | 4 bytes  | 1 byte | ...      | ...      |
 
 ### OS page cache and fsync
 Each file write does not directly map to a disk write. The OS has a memory cache; writes go to the cache first, then are synced to disk later. This allows merging repeated writes and improves throughput (repeated reads also benefit).
@@ -88,9 +88,11 @@ If we can detect an incomplete write, we can simply ignore it. The last record a
 
 We use the standard library’s `crc32.ChecksumIEEE()` to compute the checksum for log records and prepend it to the record:
 
-| crc32   | key size | val size | deleted | key data | val data |
-|---------|----------|----------|---------|----------|----------|
+| crc32   | key size | val size | op | key data | val data |
+|---------|----------|----------|----|----------|----------|
 | 4 bytes | 4 bytes  | 4 bytes  | 1 byte  | ...      | ...      |
+
+`OpCommit` is the transaction boundary record; it uses the same record layout but with `keyLen=0` and `valLen=0`, so there is no key/val payload.
 
 
 

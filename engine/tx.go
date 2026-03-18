@@ -81,35 +81,53 @@ func (tx *KVTX) Commit() error {
 // Abort discards the transaction. For now it is a no-op.
 func (tx *KVTX) Abort() {}
 
-// applyTX writes all updates in the transaction to the log and then applies them to mem.
+// applyTX writes all updates in the transaction to the log (one record per key), then Commit() for atomicity.
+// On any error, ResetTX() is called so the log write offset is rolled back.
 func (kv *KV) applyTX(tx *KVTX) error {
-	iter, err := tx.updates.Iter()
-	if err != nil {
+	if err := kv.updateLog(tx); err != nil {
 		return err
 	}
-	var recs []record
-	for iter.Valid() {
-		k, v := iter.Key(), iter.Val()
-		deleted := iter.Deleted()
-		recs = append(recs, record{key: append([]byte(nil), k...), val: append([]byte(nil), v...), deleted: deleted})
-		if err := iter.Next(); err != nil {
-			return err
-		}
-	}
-	for _, rec := range recs {
-		if err := kv.log.append(&rec); err != nil {
-			return err
-		}
-	}
-	for _, rec := range recs {
-		if rec.deleted {
-			kv.mem.Del(rec.key)
-		} else {
-			kv.mem.Set(rec.key, rec.val)
-		}
-	}
+	kv.updateMem(tx)
 	if err := kv.Compact(); err != nil {
 		return err
 	}
 	return nil
+}
+
+// updateLog writes each of tx.updates to the log, then Commit(). defer ResetTX() rolls back offset on any error.
+func (kv *KV) updateLog(tx *KVTX) error {
+	defer kv.log.ResetTX()
+	iter, err := tx.updates.Iter()
+	if err != nil {
+		return err
+	}
+	for ; err == nil && iter.Valid(); err = iter.Next() {
+		op := OpAdd
+		if iter.Deleted() {
+			op = OpDel
+		}
+		rec := record{key: append([]byte(nil), iter.Key()...), val: append([]byte(nil), iter.Val()...), op: op}
+		if err := kv.log.Write(&rec); err != nil {
+			return err
+		}
+	}
+	if err != nil {
+		return err
+	}
+	return kv.log.Commit()
+}
+
+// updateMem applies all tx.updates to kv.mem.
+func (kv *KV) updateMem(tx *KVTX) {
+	iter, err := tx.updates.Iter()
+	if err != nil {
+		return
+	}
+	for ; err == nil && iter.Valid(); err = iter.Next() {
+		if iter.Deleted() {
+			kv.mem.Del(iter.Key())
+		} else {
+			kv.mem.Set(iter.Key(), iter.Val())
+		}
+	}
 }

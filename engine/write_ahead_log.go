@@ -7,11 +7,15 @@ import (
 	"syscall"
 )
 
-// wal is the write-ahead log: append-only, each append is fsynced for durability.
-// Record format is in record.go.
+// wal is the write-ahead log. Writes use WriteAt at writer.offset; only advance offset on success.
+// writer.committed is the offset after the last OpCommit. ResetTX() rolls back to committed.
 type wal struct {
-	path string
-	file *os.File
+	path   string
+	file   *os.File
+	writer struct {
+		offset    int64
+		committed int64
+	}
 }
 
 func (w *wal) open(path string) error {
@@ -21,6 +25,8 @@ func (w *wal) open(path string) error {
 		return err
 	}
 	w.file = fp
+	w.writer.offset = 0
+	w.writer.committed = 0
 	return nil
 }
 
@@ -28,20 +34,57 @@ func (w *wal) close() error {
 	if w.file == nil {
 		return nil
 	}
+	_ = w.file.Sync()
 	err := w.file.Close()
 	w.file = nil
 	return err
 }
 
-func (w *wal) append(rec *record) error {
+// Write appends one record at the current writer offset. Uses WriteAt so on error the offset is unchanged.
+func (w *wal) Write(rec *record) error {
 	data, err := rec.encode()
 	if err != nil {
 		return err
 	}
-	if _, err := w.file.Write(data); err != nil {
+	n, err := w.file.WriteAt(data, w.writer.offset)
+	if err != nil {
 		return err
 	}
-	return w.file.Sync()
+	if n != len(data) {
+		return io.ErrShortWrite
+	}
+	w.writer.offset += int64(n)
+	return nil
+}
+
+// Commit writes an OpCommit record, syncs, and advances the committed offset.
+func (w *wal) Commit() error {
+	if err := w.Write(&record{op: OpCommit}); err != nil {
+		return err
+	}
+	if err := w.file.Sync(); err != nil {
+		return err
+	}
+	w.writer.committed = w.writer.offset
+	return nil
+}
+
+// ResetTX discards the current transaction by resetting the write offset to the last committed offset.
+func (w *wal) ResetTX() {
+	w.writer.offset = w.writer.committed
+}
+
+// readRecord reads one record from the file at the current read position.
+// Returns (bytesRead, commitSeen, err). Caller must advance read position by bytesRead.
+func (w *wal) readRecord(rec *record) (bytesRead int, commitSeen bool, err error) {
+	n, commit, e := rec.decodeFrom(w.file)
+	if e == io.EOF || e == io.ErrUnexpectedEOF {
+		return n, false, io.EOF
+	}
+	if e != nil {
+		return n, false, e
+	}
+	return n, commit, nil
 }
 
 func (w *wal) reset() error {
@@ -54,18 +97,9 @@ func (w *wal) reset() error {
 	if _, err := w.file.Seek(0, 0); err != nil {
 		return err
 	}
+	w.writer.offset = 0
+	w.writer.committed = 0
 	return w.file.Sync()
-}
-
-func (w *wal) read(rec *record) (done bool, err error) {
-	err = rec.decode(w.file)
-	if err == io.EOF || err == io.ErrUnexpectedEOF || err == ErrBadChecksum {
-		return true, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return false, nil
 }
 
 // createFileSync creates a new file (truncates if it exists) and syncs the directory.

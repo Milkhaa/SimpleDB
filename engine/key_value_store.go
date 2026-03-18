@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -69,24 +70,61 @@ func (kv *KV) openAll() error {
 		return err
 	}
 
-	var rec record
+	// Replay: only apply operations from fully committed transactions.
+	// we read the entire WAL, track the last OpCommit boundary,
+	// then apply only entries up to that boundary and truncate the WAL tail.
+	if _, err := kv.log.file.Seek(0, 0); err != nil {
+		kv.log.close()
+		kv.meta.Close()
+		return err
+	}
+	var entries []record
+	committed := 0
+	var lastCommittedOffset int64
+	var readPos int64
 	for {
-		done, err := kv.log.read(&rec)
+		var rec record
+		n, commitSeen, err := kv.log.readRecord(&rec)
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
 			kv.log.close()
 			kv.meta.Close()
 			return err
 		}
-		if done {
-			break
-		}
-		if rec.deleted {
-			kv.mem.delOrTombstone(rec.key)
+		readPos += int64(n)
+		if commitSeen {
+			committed = len(entries)
+			lastCommittedOffset = readPos
 		} else {
-			kv.mem.set(rec.key, rec.val)
+			entries = append(entries, record{
+				key: append([]byte(nil), rec.key...),
+				val: append([]byte(nil), rec.val...),
+				op:  rec.op,
+			})
 		}
 	}
 
+	kv.mem.Clear()
+	for i := 0; i < committed; i++ {
+		r := &entries[i]
+		if r.op == OpDel {
+			kv.mem.delOrTombstone(r.key)
+		} else {
+			kv.mem.set(r.key, r.val)
+		}
+	}
+
+	kv.log.writer.committed = lastCommittedOffset
+	kv.log.writer.offset = kv.log.writer.committed
+	if readPos > kv.log.writer.committed {
+		if err := kv.log.file.Truncate(kv.log.writer.committed); err != nil {
+			kv.log.close()
+			kv.meta.Close()
+			return err
+		}
+	}
 	meta := kv.meta.Get()
 	for _, name := range meta.SSTableFiles {
 		fpath := filepath.Join(kv.dir, name)

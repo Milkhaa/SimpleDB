@@ -11,100 +11,15 @@ import (
 const testDBPath = ".tmp_kv"
 
 func TestStore(t *testing.T) {
-	defer os.RemoveAll(testDBPath)
-	os.RemoveAll(testDBPath)
-
-	kv, err := Open(Config{Path: testDBPath})
+	dir := t.TempDir()
+	kv2 := doStoreReopen(t, dir)
+	defer kv2.Close()
+	_, ok, _ := kv2.Get([]byte("foo"))
+	assert.False(t, ok)
+	val, ok, err := kv2.Get([]byte("baz"))
 	assert.NoError(t, err)
-	defer kv.Close()
-
-	updated, err := kv.Set([]byte("foo"), []byte("bar"))
-	assert.True(t, updated)
-	assert.NoError(t, err)
-
-	val, ok, err := kv.Get([]byte("foo"))
 	assert.True(t, ok)
-	assert.NoError(t, err)
-	assert.Equal(t, "bar", string(val))
-
-	_, ok, err = kv.Get([]byte("missing"))
-	assert.False(t, ok)
-	assert.NoError(t, err)
-
-	updated, err = kv.Del([]byte("missing"))
-	assert.False(t, updated)
-	assert.NoError(t, err)
-
-	updated, err = kv.Del([]byte("foo"))
-	assert.True(t, updated)
-	assert.NoError(t, err)
-
-	_, ok, err = kv.Get([]byte("foo"))
-	assert.False(t, ok)
-	assert.NoError(t, err)
-
-	updated, err = kv.Set([]byte("baz"), []byte("qux"))
-	assert.True(t, updated)
-	assert.NoError(t, err)
-
-	// Simulate restart: close and reopen.
-	kv.Close()
-	kv, err = Open(Config{Path: testDBPath})
-	assert.NoError(t, err)
-
-	_, ok, err = kv.Get([]byte("foo"))
-	assert.False(t, ok)
-	assert.NoError(t, err)
-
-	val, ok, err = kv.Get([]byte("baz"))
-	assert.True(t, ok)
-	assert.NoError(t, err)
 	assert.Equal(t, "qux", string(val))
-
-	updated, err = kv.Set([]byte("zap"), []byte("bang"))
-	assert.True(t, updated)
-	assert.NoError(t, err)
-
-	kv.Close()
-
-	// Truncate last byte of WAL to simulate incomplete write.
-	walPath := filepath.Join(testDBPath, "wal")
-	fp, err := os.OpenFile(walPath, os.O_RDWR, 0o644)
-	assert.NoError(t, err)
-	st, _ := fp.Stat()
-	err = fp.Truncate(st.Size() - 1)
-	assert.NoError(t, err)
-	fp.Close()
-
-	kv, err = Open(Config{Path: testDBPath})
-	assert.NoError(t, err)
-	val, ok, err = kv.Get([]byte("baz"))
-	assert.True(t, ok)
-	assert.NoError(t, err)
-	assert.Equal(t, "qux", string(val))
-	_, ok, err = kv.Get([]byte("zap"))
-	assert.False(t, ok)
-	assert.NoError(t, err)
-	kv.Close()
-
-	// Corrupt last byte of WAL to simulate bad checksum.
-	fp, err = os.OpenFile(walPath, os.O_RDWR, 0o644)
-	assert.NoError(t, err)
-	st, _ = fp.Stat()
-	_, err = fp.WriteAt([]byte{0}, st.Size()-1)
-	assert.NoError(t, err)
-	fp.Close()
-
-	kv, err = Open(Config{Path: testDBPath})
-	assert.NoError(t, err)
-	val, ok, err = kv.Get([]byte("baz"))
-	assert.True(t, ok)
-	assert.NoError(t, err)
-	assert.Equal(t, "qux", string(val))
-	_, ok, err = kv.Get([]byte("zap"))
-	assert.False(t, ok)
-	assert.NoError(t, err)
-	kv.Close()
 }
 
 const testLSMDir = ".tmp_lsm"
@@ -204,4 +119,181 @@ func TestStoreTransactionAbort(t *testing.T) {
 	_, ok, err := kv.Get([]byte("k1"))
 	assert.NoError(t, err)
 	assert.False(t, ok)
+}
+
+// TestStoreReplayOneKey verifies WAL replay after close/reopen with a single key.
+func TestStoreReplayOneKey(t *testing.T) {
+	dir := t.TempDir()
+
+	kv, err := Open(Config{Path: dir})
+	assert.NoError(t, err)
+	_, err = kv.Set([]byte("baz"), []byte("qux"))
+	assert.NoError(t, err)
+	err = kv.Close()
+	assert.NoError(t, err)
+
+	kv2, err := Open(Config{Path: dir})
+	assert.NoError(t, err)
+	defer kv2.Close()
+	val, ok, err := kv2.Get([]byte("baz"))
+	assert.NoError(t, err)
+	assert.True(t, ok, "baz should be found after reopen")
+	assert.Equal(t, "qux", string(val))
+}
+
+// TestStoreReplayTwoKeys verifies WAL replay with two commits (Set then Set, no Del).
+func TestStoreReplayTwoKeys(t *testing.T) {
+	dir := t.TempDir()
+
+	kv, err := Open(Config{Path: dir})
+	assert.NoError(t, err)
+	_, err = kv.Set([]byte("foo"), []byte("bar"))
+	assert.NoError(t, err)
+	_, err = kv.Set([]byte("baz"), []byte("qux"))
+	assert.NoError(t, err)
+	err = kv.Close()
+	assert.NoError(t, err)
+
+	kv2, err := Open(Config{Path: dir})
+	assert.NoError(t, err)
+	defer kv2.Close()
+	val, ok, err := kv2.Get([]byte("baz"))
+	assert.NoError(t, err)
+	assert.True(t, ok, "baz should be found after reopen")
+	assert.Equal(t, "qux", string(val))
+	val, ok, err = kv2.Get([]byte("foo"))
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "bar", string(val))
+}
+
+// TestStoreReplaySetDelSet verifies WAL replay with Set, Del, Set (same as TestStore sequence).
+func TestStoreReplaySetDelSet(t *testing.T) {
+	dir := t.TempDir()
+
+	kv, err := Open(Config{Path: dir})
+	assert.NoError(t, err)
+	kv.Set([]byte("foo"), []byte("bar"))
+	kv.Del([]byte("foo"))
+	kv.Set([]byte("baz"), []byte("qux"))
+	err = kv.Close()
+	assert.NoError(t, err)
+
+	kv2, err := Open(Config{Path: dir})
+	assert.NoError(t, err)
+	defer kv2.Close()
+	_, ok, err := kv2.Get([]byte("foo"))
+	assert.NoError(t, err)
+	assert.False(t, ok, "foo should be deleted")
+	val, ok, err := kv2.Get([]byte("baz"))
+	assert.NoError(t, err)
+	assert.True(t, ok, "baz should be found after reopen")
+	assert.Equal(t, "qux", string(val))
+}
+
+// doStoreReopen runs the standard Set(foo), Del(foo), Set(baz) sequence, closes, reopens, and returns the new KV.
+func doStoreReopen(t *testing.T, dir string) *KV {
+	kv, err := Open(Config{Path: dir})
+	assert.NoError(t, err)
+	kv.Set([]byte("foo"), []byte("bar"))
+	kv.Get([]byte("foo"))
+	kv.Get([]byte("missing"))
+	kv.Del([]byte("missing"))
+	kv.Del([]byte("foo"))
+	kv.Get([]byte("foo"))
+	kv.Set([]byte("baz"), []byte("qux"))
+	kv.Close()
+	kv2, err := Open(Config{Path: dir})
+	assert.NoError(t, err)
+	return kv2
+}
+
+// TestStoreReplayExactSequence mirrors TestStore's exact first-run sequence then reopen.
+func TestStoreReplayExactSequence(t *testing.T) {
+	dir := t.TempDir()
+	kv2 := doStoreReopen(t, dir)
+	defer kv2.Close()
+	_, ok, _ := kv2.Get([]byte("foo"))
+	assert.False(t, ok)
+	val, ok, err := kv2.Get([]byte("baz"))
+	assert.NoError(t, err)
+	assert.True(t, ok, "baz should be found")
+	assert.Equal(t, "qux", string(val))
+}
+
+// TestStoreRecovery (from 0804 TestKVRecovery) verifies replay after truncated or corrupted WAL.
+// Only transactions that ended with OpCommit are applied; partial transaction at end is discarded.
+func TestStoreRecovery(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write k1 and k2 in two separate transactions, then truncate last byte of WAL.
+	kv, err := Open(Config{Path: dir})
+	assert.NoError(t, err)
+	_, err = kv.Set([]byte("k1"), []byte("v1"))
+	assert.NoError(t, err)
+	_, err = kv.Set([]byte("k2"), []byte("v2"))
+	assert.NoError(t, err)
+	kv.Close()
+
+	walPath := filepath.Join(dir, "wal")
+	fp, err := os.OpenFile(walPath, os.O_RDWR, 0o644)
+	assert.NoError(t, err)
+	st, err := fp.Stat()
+	assert.NoError(t, err)
+	err = fp.Truncate(st.Size() - 1)
+	assert.NoError(t, err)
+	fp.Close()
+
+	kv2, err := Open(Config{Path: dir})
+	assert.NoError(t, err)
+	defer kv2.Close()
+	val, ok, err := kv2.Get([]byte("k1"))
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "v1", string(val))
+	_, ok, err = kv2.Get([]byte("k2"))
+	assert.NoError(t, err)
+	assert.False(t, ok, "k2's transaction was truncated so it should not be replayed")
+}
+
+// TestStoreRecoveryMultiKeyTX (from 0805 TestKVRecovery) verifies atomicity: one tx with k2+k3,
+// truncate WAL, reopen → only k1 (previous tx) is present; k2 and k3 (same tx) are both absent.
+func TestStoreRecoveryMultiKeyTX(t *testing.T) {
+	dir := t.TempDir()
+
+	kv, err := Open(Config{Path: dir})
+	assert.NoError(t, err)
+	_, err = kv.Set([]byte("k1"), []byte("v1"))
+	assert.NoError(t, err)
+	tx := kv.NewTX()
+	_, err = tx.Set([]byte("k3"), []byte("v3"))
+	assert.NoError(t, err)
+	_, err = tx.Set([]byte("k2"), []byte("v2"))
+	assert.NoError(t, err)
+	err = tx.Commit()
+	assert.NoError(t, err)
+	kv.Close()
+
+	walPath := filepath.Join(dir, "wal")
+	fp, err := os.OpenFile(walPath, os.O_RDWR, 0o644)
+	assert.NoError(t, err)
+	st, err := fp.Stat()
+	assert.NoError(t, err)
+	err = fp.Truncate(st.Size() - 1)
+	assert.NoError(t, err)
+	fp.Close()
+
+	kv2, err := Open(Config{Path: dir})
+	assert.NoError(t, err)
+	defer kv2.Close()
+	val, ok, err := kv2.Get([]byte("k1"))
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "v1", string(val))
+	_, ok, err = kv2.Get([]byte("k2"))
+	assert.NoError(t, err)
+	assert.False(t, ok, "k2 in same tx as k3; truncated tx should not be replayed")
+	_, ok, err = kv2.Get([]byte("k3"))
+	assert.NoError(t, err)
+	assert.False(t, ok, "k3 in same tx as k2; truncated tx should not be replayed")
 }

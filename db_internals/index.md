@@ -55,7 +55,7 @@ With indexes, one record in a table may use multiple keys. We need the transacti
 ```
 
 Right now, log + checksum ensures single-key atomicity. 
-< If a log record contains multiple keys, we can get transaction atomicity. That can be done later>
+< If a log record contains multiple keys, we can get transaction atomicity easily>
 
 ### Transaction Updates
 We can record updates inside a transaction and apply them together on commit.
@@ -77,23 +77,24 @@ Reads in a transaction must see its own updates. This is just one more LSM-Tree 
 
 
 ### Log Rollback
-Currently, one KV update uses one log entry. If all updates in one transaction share one entry, atomicity can be achieved. This is one approach. Another is to add a record type to mark the end of a transaction.
+For durability, each KV update is written to the WAL. To make multi-key transactions atomic,
+the WAL also contains a dedicated commit record that marks the transaction boundary.
 
 ```
 const (
-    EntryAdd EntryOp = 0
-    EntryDel EntryOp = 1
-    EntryCommit EntryOp = 2 // new
+    OpAdd    byte = 0
+    OpDel    byte = 1
+    OpCommit byte = 2 // new
 )
-type Entry struct {
+type record struct {
     key []byte
     val []byte
-    // deleted bool
-    op EntryOp
+    // op encodes the record kind: OpAdd, OpDel, or OpCommit.
+    op RecordOp
 }
 ```
 
-- On database startup, only process records before EntryCommit.
+- On database startup, only process records before OpCommit.
 - If writing the log returns an error midway, the next write must restore the file offset to the start of the transaction.
 
 Do not blindly append to the file. Track the file offset and use WriteAt(). If Log.Write() returns an error, the file offset must not change.
