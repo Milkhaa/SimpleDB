@@ -203,15 +203,49 @@ func (db *DB) SelectByIndex(schema *Schema, indexID int, row Row) ([]Row, error)
 	return out, nil
 }
 
+// SelectAll returns all rows in the given schema by scanning the row-key namespace.
+// It ignores secondary-index keys (which live in a separate key prefix namespace).
+func (db *DB) SelectAll(schema *Schema) ([]Row, error) {
+	// Row key format: tableName + 0x00 + primary-key cells.
+	prefix := append([]byte(schema.Table), 0)
+	iter, err := db.store.Seek(prefix)
+	if err != nil {
+		return nil, err
+	}
+	var out []Row
+	for iter.Valid() {
+		k := iter.Key()
+		if !bytes.HasPrefix(k, prefix) {
+			break
+		}
+		r := schema.NewRow()
+		if err := r.DecodeKey(schema, k); err != nil {
+			return nil, err
+		}
+		if err := r.DecodeVal(schema, iter.Val()); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+		if err := iter.Next(); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
+}
+
 // Insert writes the row. It returns updated=true if the key was new or the value changed.
 func (db *DB) Insert(schema *Schema, row Row) (updated bool, err error) {
+	tx := db.store.NewTX()
+	defer tx.Abort()
+
 	key, err := row.EncodeKey(schema)
 	if err != nil {
 		return false, err
 	}
+
 	// If the row already exists, load the old version so we can maintain secondary index entries.
 	var oldRow Row
-	oldVal, exists, err := db.store.Get(key)
+	oldVal, exists, err := tx.Get(key)
 	if err != nil {
 		return false, err
 	}
@@ -224,23 +258,26 @@ func (db *DB) Insert(schema *Schema, row Row) (updated bool, err error) {
 			return false, err
 		}
 	}
+
 	val, err := row.EncodeVal(schema)
 	if err != nil {
 		return false, err
 	}
-	updated, err = db.store.Set(key, val)
+
+	updated, err = tx.Set(key, val)
 	if err != nil || !updated {
 		return updated, err
 	}
-	// Maintain secondary indexes (Indices[1:]).
+
+	// Maintain secondary indexes (Indices[1:]) in the same transaction as the primary row.
+	// This avoids inconsistent state if the process crashes mid-update.
 	if exists {
 		for indexID := 1; indexID < len(schema.Indices); indexID++ {
 			oldIdxKey, err := indexEntryKey(schema, indexID, oldRow)
 			if err != nil {
 				return true, err
 			}
-			_, err = db.store.Del(oldIdxKey)
-			if err != nil {
+			if _, err := tx.Del(oldIdxKey); err != nil {
 				return true, err
 			}
 		}
@@ -250,9 +287,13 @@ func (db *DB) Insert(schema *Schema, row Row) (updated bool, err error) {
 		if err != nil {
 			return true, err
 		}
-		if _, err := db.store.Set(idxKey, nil); err != nil {
+		if _, err := tx.Set(idxKey, nil); err != nil {
 			return true, err
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return true, err
 	}
 	return true, nil
 }
@@ -264,12 +305,16 @@ func (db *DB) Update(schema *Schema, row Row) (updated bool, err error) {
 
 // Delete removes the row by primary key. Returns deleted=true if the key existed.
 func (db *DB) Delete(schema *Schema, row Row) (deleted bool, err error) {
+	tx := db.store.NewTX()
+	defer tx.Abort()
+
 	key, err := row.EncodeKey(schema)
 	if err != nil {
 		return false, err
 	}
+
 	// Load existing row so we can remove secondary index entries.
-	oldVal, exists, err := db.store.Get(key)
+	oldVal, exists, err := tx.Get(key)
 	if err != nil || !exists {
 		return false, err
 	}
@@ -280,14 +325,24 @@ func (db *DB) Delete(schema *Schema, row Row) (deleted bool, err error) {
 	if err := oldRow.DecodeVal(schema, oldVal); err != nil {
 		return false, err
 	}
+
 	for indexID := 1; indexID < len(schema.Indices); indexID++ {
 		idxKey, err := indexEntryKey(schema, indexID, oldRow)
 		if err != nil {
 			return false, err
 		}
-		if _, err := db.store.Del(idxKey); err != nil {
+		if _, err := tx.Del(idxKey); err != nil {
 			return false, err
 		}
 	}
-	return db.store.Del(key)
+
+	deleted, err = tx.Del(key)
+	if err != nil {
+		return deleted, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return true, err
+	}
+	return deleted, nil
 }

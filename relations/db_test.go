@@ -2,6 +2,7 @@ package relations
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -307,4 +308,157 @@ func TestDeleteByIndex(t *testing.T) {
 	r, err = db.ExecStmt(mustParseStmt(t, "select a, b, c from t where a = 'p';"))
 	require.NoError(t, err)
 	require.Len(t, r.Values, 0)
+}
+
+func truncateWALLastByte(t *testing.T, dir string) {
+	t.Helper()
+	walPath := filepath.Join(dir, "wal")
+	fp, err := os.OpenFile(walPath, os.O_RDWR, 0o644)
+	require.NoError(t, err)
+	st, err := fp.Stat()
+	require.NoError(t, err)
+	require.Greater(t, st.Size(), int64(0))
+	require.NoError(t, fp.Truncate(st.Size()-1))
+	require.NoError(t, fp.Close())
+}
+
+func TestNoWhereSelectUpdateDelete(t *testing.T) {
+	dir := t.TempDir()
+
+	db := &DB{}
+	require.NoError(t, db.Open(dir))
+	defer db.Close()
+
+	_, err := db.ExecStmt(mustParseStmt(t, "create table t (id int64, name string, primary key (id), index (name));"))
+	require.NoError(t, err)
+
+	_, err = db.ExecStmt(mustParseStmt(t, "insert into t values (1, 'a');"))
+	require.NoError(t, err)
+	_, err = db.ExecStmt(mustParseStmt(t, "insert into t values (2, 'b');"))
+	require.NoError(t, err)
+
+	// SELECT without WHERE => full-table scan.
+	r, err := db.ExecStmt(mustParseStmt(t, "select id, name from t;"))
+	require.NoError(t, err)
+	require.Len(t, r.Values, 2)
+
+	// UPDATE without WHERE => update all rows.
+	r, err = db.ExecStmt(mustParseStmt(t, "update t set name = 'z';"))
+	require.NoError(t, err)
+	require.Equal(t, 2, r.Updated)
+
+	// Confirm secondary index updates after UPDATE (no crash simulation here).
+	r, err = db.ExecStmt(mustParseStmt(t, "select id, name from t where name = 'z';"))
+	require.NoError(t, err)
+	require.Len(t, r.Values, 2)
+
+	// DELETE without WHERE => delete all rows.
+	r, err = db.ExecStmt(mustParseStmt(t, "delete from t;"))
+	require.NoError(t, err)
+	require.Equal(t, 2, r.Updated)
+
+	r, err = db.ExecStmt(mustParseStmt(t, "select id from t;"))
+	require.NoError(t, err)
+	require.Len(t, r.Values, 0)
+}
+
+func TestUpdateRejectsPrimaryKeyChange(t *testing.T) {
+	dir := t.TempDir()
+
+	db := &DB{}
+	require.NoError(t, db.Open(dir))
+	defer db.Close()
+
+	_, err := db.ExecStmt(mustParseStmt(t, "create table t (id int64, data string, primary key (id));"))
+	require.NoError(t, err)
+	_, err = db.ExecStmt(mustParseStmt(t, "insert into t values (1, 'a');"))
+	require.NoError(t, err)
+
+	_, err = db.ExecStmt(mustParseStmt(t, "update t set id = 2, data = 'b' where id = 1;"))
+	require.Error(t, err)
+
+	// Old row should remain.
+	r, err := db.ExecStmt(mustParseStmt(t, "select data from t where id = 1;"))
+	require.NoError(t, err)
+	require.Len(t, r.Values, 1)
+	require.Equal(t, []byte("a"), r.Values[0][0].Str)
+
+	// New PK row must not exist.
+	r, err = db.ExecStmt(mustParseStmt(t, "select data from t where id = 2;"))
+	require.NoError(t, err)
+	require.Len(t, r.Values, 0)
+}
+
+func TestSecondaryIndexUpdateAtomicOnCrash(t *testing.T) {
+	dir := t.TempDir()
+
+	db := &DB{}
+	require.NoError(t, db.Open(dir))
+
+	_, err := db.ExecStmt(mustParseStmt(t, "create table t (id int64, email string, name string, primary key (id), index (email));"))
+	require.NoError(t, err)
+	_, err = db.ExecStmt(mustParseStmt(t, "insert into t values (1, 'a@x', 'alice');"))
+	require.NoError(t, err)
+
+	// Change indexed column so index mutations must be consistent with the primary row.
+	_, err = db.ExecStmt(mustParseStmt(t, "update t set email = 'b@x' where id = 1;"))
+	require.NoError(t, err)
+
+	require.NoError(t, db.Close())
+	truncateWALLastByte(t, dir)
+
+	db2 := &DB{}
+	require.NoError(t, db2.Open(dir))
+	defer db2.Close()
+
+	// After rollback of the last transaction, the old email must remain.
+	r, err := db2.ExecStmt(mustParseStmt(t, "select email from t where id = 1;"))
+	require.NoError(t, err)
+	require.Len(t, r.Values, 1)
+	require.Equal(t, []byte("a@x"), r.Values[0][0].Str)
+
+	// Old index should still exist...
+	r, err = db2.ExecStmt(mustParseStmt(t, "select id from t where email = 'a@x';"))
+	require.NoError(t, err)
+	require.Len(t, r.Values, 1)
+
+	// ...and new index must not.
+	r, err = db2.ExecStmt(mustParseStmt(t, "select id from t where email = 'b@x';"))
+	require.NoError(t, err)
+	require.Len(t, r.Values, 0)
+}
+
+func TestSecondaryIndexDeleteAtomicOnCrash(t *testing.T) {
+	dir := t.TempDir()
+
+	db := &DB{}
+	require.NoError(t, db.Open(dir))
+
+	_, err := db.ExecStmt(mustParseStmt(t, "create table t (id int64, email string, name string, primary key (id), index (email));"))
+	require.NoError(t, err)
+	_, err = db.ExecStmt(mustParseStmt(t, "insert into t values (1, 'a@x', 'alice');"))
+	require.NoError(t, err)
+
+	// Delete the row; crash after completion by truncating the WAL tail.
+	r, err := db.ExecStmt(mustParseStmt(t, "delete from t where id = 1;"))
+	require.NoError(t, err)
+	require.Equal(t, 1, r.Updated)
+
+	require.NoError(t, db.Close())
+	truncateWALLastByte(t, dir)
+
+	db2 := &DB{}
+	require.NoError(t, db2.Open(dir))
+	defer db2.Close()
+
+	// The row should still exist after rollback.
+	r, err = db2.ExecStmt(mustParseStmt(t, "select email from t where id = 1;"))
+	require.NoError(t, err)
+	require.Len(t, r.Values, 1)
+	require.Equal(t, []byte("a@x"), r.Values[0][0].Str)
+
+	// And the old index should still exist as well.
+	r, err = db2.ExecStmt(mustParseStmt(t, "select id from t where email = 'a@x';"))
+	require.NoError(t, err)
+	require.Len(t, r.Values, 1)
 }

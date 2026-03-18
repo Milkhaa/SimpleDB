@@ -8,7 +8,8 @@ import (
 )
 
 // wal is the write-ahead log. Writes use WriteAt at writer.offset; only advance offset on success.
-// writer.committed is the offset after the last OpCommit. ResetTX() rolls back to committed.
+// writer.committed is the byte offset after the last commit boundary (OpCommit).
+// ResetTX truncates the WAL tail back to writer.committed.
 type wal struct {
 	path   string
 	file   *os.File
@@ -69,9 +70,21 @@ func (w *wal) Commit() error {
 	return nil
 }
 
-// ResetTX discards the current transaction by resetting the write offset to the last committed offset.
-func (w *wal) ResetTX() {
+// ResetTX discards the current transaction by truncating the WAL back to the last committed offset.
+// This removes any stale suffix left by partial record writes.
+func (w *wal) ResetTX() error {
+	if w.file == nil {
+		return nil
+	}
+	if err := w.file.Truncate(w.writer.committed); err != nil {
+		return err
+	}
 	w.writer.offset = w.writer.committed
+	// Seek is not required for WriteAt, but helps keep the file position consistent for future reads.
+	if _, err := w.file.Seek(w.writer.committed, 0); err != nil {
+		return err
+	}
+	return w.file.Sync()
 }
 
 // readRecord reads one record from the file at the current read position.

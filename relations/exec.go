@@ -117,27 +117,35 @@ func (db *DB) execSelect(s *stmtSelect) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
 	}
-	indexID, err := matchIndexForWhere(schema, s.Keys)
-	if err != nil {
-		return ExecResult{}, err
-	}
-	row := schema.NewRow()
-	if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
-		return ExecResult{}, err
-	}
+
 	var rows []Row
-	if indexID == 0 {
-		ok, err := db.Select(schema, row)
+	if len(s.Keys) == 0 {
+		rows, err = db.SelectAll(schema)
 		if err != nil {
 			return ExecResult{}, err
-		}
-		if ok {
-			rows = []Row{row}
 		}
 	} else {
-		rows, err = db.SelectByIndex(schema, indexID, row)
+		indexID, err := matchIndexForWhere(schema, s.Keys)
 		if err != nil {
 			return ExecResult{}, err
+		}
+		row := schema.NewRow()
+		if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
+			return ExecResult{}, err
+		}
+		if indexID == 0 {
+			ok, err := db.Select(schema, row)
+			if err != nil {
+				return ExecResult{}, err
+			}
+			if ok {
+				rows = []Row{row}
+			}
+		} else {
+			rows, err = db.SelectByIndex(schema, indexID, row)
+			if err != nil {
+				return ExecResult{}, err
+			}
 		}
 	}
 	var values []Row
@@ -156,27 +164,47 @@ func (db *DB) execUpdate(s *stmtUpdate) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
 	}
-	indexID, err := matchIndexForWhere(schema, s.Keys)
-	if err != nil {
-		return ExecResult{}, err
+
+	// Reject primary-key updates: changing the PK without knowing the old key
+	// would behave like a blind insert and leave old row/index entries behind.
+	for _, nv := range s.Value {
+		i := columnIndex(schema, nv.Column)
+		if i < 0 {
+			return ExecResult{}, fmt.Errorf("unknown column %q", nv.Column)
+		}
+		if schema.IsPKey(i) {
+			return ExecResult{}, fmt.Errorf("update: primary key column %q cannot be updated", nv.Column)
+		}
 	}
-	row := schema.NewRow()
-	if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
-		return ExecResult{}, err
-	}
+
 	var rows []Row
-	if indexID == 0 {
-		ok, err := db.Select(schema, row)
+	if len(s.Keys) == 0 {
+		rows, err = db.SelectAll(schema)
 		if err != nil {
 			return ExecResult{}, err
-		}
-		if ok {
-			rows = []Row{row}
 		}
 	} else {
-		rows, err = db.SelectByIndex(schema, indexID, row)
+		indexID, err := matchIndexForWhere(schema, s.Keys)
 		if err != nil {
 			return ExecResult{}, err
+		}
+		row := schema.NewRow()
+		if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
+			return ExecResult{}, err
+		}
+		if indexID == 0 {
+			ok, err := db.Select(schema, row)
+			if err != nil {
+				return ExecResult{}, err
+			}
+			if ok {
+				rows = []Row{row}
+			}
+		} else {
+			rows, err = db.SelectByIndex(schema, indexID, row)
+			if err != nil {
+				return ExecResult{}, err
+			}
 		}
 	}
 	n := 0
@@ -204,27 +232,35 @@ func (db *DB) execDelete(s *stmtDelete) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("table %q not found", s.Table)
 	}
-	indexID, err := matchIndexForWhere(schema, s.Keys)
-	if err != nil {
-		return ExecResult{}, err
-	}
-	row := schema.NewRow()
-	if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
-		return ExecResult{}, err
-	}
+
 	var rows []Row
-	if indexID == 0 {
-		ok, err := db.Select(schema, row)
+	if len(s.Keys) == 0 {
+		rows, err = db.SelectAll(schema)
 		if err != nil {
 			return ExecResult{}, err
-		}
-		if ok {
-			rows = []Row{row}
 		}
 	} else {
-		rows, err = db.SelectByIndex(schema, indexID, row)
+		indexID, err := matchIndexForWhere(schema, s.Keys)
 		if err != nil {
 			return ExecResult{}, err
+		}
+		row := schema.NewRow()
+		if err := fillRowFromKeys(schema, row, s.Keys); err != nil {
+			return ExecResult{}, err
+		}
+		if indexID == 0 {
+			ok, err := db.Select(schema, row)
+			if err != nil {
+				return ExecResult{}, err
+			}
+			if ok {
+				rows = []Row{row}
+			}
+		} else {
+			rows, err = db.SelectByIndex(schema, indexID, row)
+			if err != nil {
+				return ExecResult{}, err
+			}
 		}
 	}
 	n := 0

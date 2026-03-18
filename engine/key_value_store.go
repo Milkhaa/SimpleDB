@@ -85,6 +85,9 @@ func (kv *KV) openAll() error {
 	for {
 		var rec record
 		n, commitSeen, err := kv.log.readRecord(&rec)
+		// Always advance readPos by bytes consumed, even on EOF, so we can
+		// safely truncate stale partial-record suffixes.
+		readPos += int64(n)
 		if err == io.EOF {
 			break
 		}
@@ -93,7 +96,6 @@ func (kv *KV) openAll() error {
 			kv.meta.Close()
 			return err
 		}
-		readPos += int64(n)
 		if commitSeen {
 			committed = len(entries)
 			lastCommittedOffset = readPos
