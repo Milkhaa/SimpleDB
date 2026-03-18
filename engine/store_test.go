@@ -111,6 +111,8 @@ func TestStoreReopenUnderLoad(t *testing.T) {
 	const N = 20
 
 	for mode := 0; mode < 3; mode++ {
+		// Start each mode from a clean database directory (mirrors the 0805 test pattern).
+		os.RemoveAll(dir)
 		kv, err := Open(Config{Path: dir, LogThreshold: 4})
 		require.NoError(t, err)
 
