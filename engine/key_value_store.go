@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -137,49 +136,46 @@ func (kv *KV) Seek(key []byte) (SortedKVIter, error) {
 }
 
 // Get returns the value for key. ok is false if the key is missing or was deleted.
+// Implemented as a single-operation transaction that aborts without committing.
 func (kv *KV) Get(key []byte) (value []byte, ok bool, err error) {
-	iter, err := kv.Seek(key)
-	if err != nil {
-		return nil, false, err
-	}
-	ok = iter.Valid() && bytes.Equal(iter.Key(), key)
-	if ok {
-		value = iter.Val()
-	}
-	return value, ok, err
+
+	tx := kv.NewTX()
+	defer tx.Abort()
+	return tx.Get(key)
 }
 
 // Set writes key-value. It returns updated=true if the key was new or the value changed.
+// Implemented as a single-operation transaction; commits only when updated.
 func (kv *KV) Set(key, value []byte) (updated bool, err error) {
-	oldVal, exist, err := kv.Get(key)
+	tx := kv.NewTX()
+	updated, err = tx.Set(key, value)
 	if err != nil {
+		tx.Abort()
 		return false, err
 	}
-	updated = !exist || !bytes.Equal(oldVal, value)
-	if !updated {
-		return false, nil
-	}
-	if err := kv.log.append(&record{key: key, val: value, deleted: false}); err != nil {
+	if updated {
+		err = tx.Commit()
 		return true, err
 	}
-	kv.mem.Set(key, value)
-	if err := kv.Compact(); err != nil {
-		return true, err
-	}
-	return true, nil
+	tx.Abort()
+	return false, nil
 }
 
 // Del removes key. It returns updated=true if the key existed.
+// Implemented as a single-operation transaction; commits only when the key existed.
 func (kv *KV) Del(key []byte) (updated bool, err error) {
-	_, exist, err := kv.Get(key)
-	if err != nil || !exist {
+	tx := kv.NewTX()
+	updated, err = tx.Del(key)
+	if err != nil {
+		tx.Abort()
 		return false, err
 	}
-	if err := kv.log.append(&record{key: key, deleted: true}); err != nil {
+	if updated {
+		err = tx.Commit()
 		return true, err
 	}
-	kv.mem.Del(key)
-	return true, nil
+	tx.Abort()
+	return false, nil
 }
 
 // Compact flushes the MemTable if it exceeds logThreshold, then merges adjacent

@@ -154,3 +154,54 @@ func TestStoreLSM(t *testing.T) {
 	assert.False(t, ok)
 	s.Close()
 }
+
+func TestStoreTransaction(t *testing.T) {
+	defer os.RemoveAll(testDBPath)
+	os.RemoveAll(testDBPath)
+
+	kv, err := Open(Config{Path: testDBPath})
+	assert.NoError(t, err)
+	defer kv.Close()
+
+	tx := kv.NewTX()
+	u1, err := tx.Set([]byte("k1"), []byte("v1"))
+	assert.True(t, u1)
+	assert.NoError(t, err)
+	u2, err := tx.Set([]byte("k2"), []byte("v2"))
+	assert.True(t, u2)
+	assert.NoError(t, err)
+	// Reads inside tx see own updates
+	v1, ok, err := tx.Get([]byte("k1"))
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "v1", string(v1))
+	assert.NoError(t, tx.Commit())
+
+	// After commit, reads see persisted data
+	v1, ok, err = kv.Get([]byte("k1"))
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "v1", string(v1))
+	v2, ok, err := kv.Get([]byte("k2"))
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "v2", string(v2))
+}
+
+func TestStoreTransactionAbort(t *testing.T) {
+	defer os.RemoveAll(testDBPath)
+	os.RemoveAll(testDBPath)
+
+	kv, err := Open(Config{Path: testDBPath})
+	assert.NoError(t, err)
+	defer kv.Close()
+
+	tx := kv.NewTX()
+	_, err = tx.Set([]byte("k1"), []byte("v1"))
+	assert.NoError(t, err)
+	tx.Abort()
+
+	_, ok, err := kv.Get([]byte("k1"))
+	assert.NoError(t, err)
+	assert.False(t, ok)
+}

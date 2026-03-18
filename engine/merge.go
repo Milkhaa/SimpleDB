@@ -91,6 +91,8 @@ func (iter *MergedSortedKVIter) Next() error {
 	if iter.Valid() {
 		cur = iter.Key()
 	}
+
+	// every level that was “at” the current key is advanced past it.
 	for _, sub := range iter.levels {
 		if !sub.Valid() || bytes.Compare(cur, sub.Key()) >= 0 {
 			if err := sub.Next(); err != nil {
@@ -107,6 +109,8 @@ func (iter *MergedSortedKVIter) Prev() error {
 	if iter.Valid() {
 		cur = iter.Key()
 	}
+
+	//every level that was “at” the current key is advanced past it.
 	for _, sub := range iter.levels {
 		if !sub.Valid() || bytes.Compare(cur, sub.Key()) <= 0 {
 			if err := sub.Prev(); err != nil {
@@ -114,6 +118,7 @@ func (iter *MergedSortedKVIter) Prev() error {
 			}
 		}
 	}
+
 	iter.which = levelsHighest(iter.levels)
 	return nil
 }
