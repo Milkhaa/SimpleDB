@@ -1,11 +1,22 @@
 package relations
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/Milkhaa/SimpleDB/engine"
 )
+
+// DB is the relational interface: it wraps the engine key-value store and a
+// per-table schema cache. Row keys are table name + primary key; row values
+// are non-primary-key columns. Schemas are persisted under schemaKey and
+// loaded on demand in GetSchema.
+type DB struct {
+	store  *engine.KV
+	tables map[string]*Schema // cached schemas by table name
+}
 
 // Schema storage key: "@schema_<tableName>". Table names must not contain null bytes.
 func schemaKey(tableName string) []byte {
@@ -18,13 +29,59 @@ func (db *DB) ensureTables() {
 	}
 }
 
-// DB is the relational interface: it wraps the engine key-value store and a
-// per-table schema cache. Row keys are table name + primary key; row values
-// are non-primary-key columns. Schemas are persisted under schemaKey and
-// loaded on demand in GetSchema.
-type DB struct {
-	store  *engine.KV
-	tables map[string]*Schema // cached schemas by table name
+func indexPrefix(table string, indexID int) []byte {
+	// Keep index keys outside the row-key namespace (which starts with tableName bytes).
+	// Format: "@idx_" + table + "\x00" + indexID + "\x00"
+	b := make([]byte, 0, len(table)+16)
+	b = append(b, "@idx_"...)
+	b = append(b, table...)
+	b = append(b, 0)
+	b = append(b, byte(indexID))
+	b = append(b, 0)
+	return b
+}
+
+func indexEntryKey(schema *Schema, indexID int, row Row) ([]byte, error) {
+	if err := schema.Validate(); err != nil {
+		return nil, err
+	}
+	if indexID <= 0 || indexID >= len(schema.Indices) {
+		return nil, fmt.Errorf("relations: invalid index id %d", indexID)
+	}
+	key := indexPrefix(schema.Table, indexID)
+	for _, colIdx := range schema.Indices[indexID] {
+		if colIdx >= len(row) {
+			return nil, fmt.Errorf("relations: index col %d out of row length %d", colIdx, len(row))
+		}
+		key = row[colIdx].EncodeKey(key)
+	}
+	// Suffix with the primary key so multiple rows can share the same secondary key.
+	for _, colIdx := range schema.PKey() {
+		if colIdx >= len(row) {
+			return nil, fmt.Errorf("relations: PKey col %d out of row length %d", colIdx, len(row))
+		}
+		key = row[colIdx].EncodeKey(key)
+	}
+	return key, nil
+}
+
+// indexKeyPrefix returns the index key prefix for a given index and row (index columns only, no PK).
+// Used to Seek into index entries; stored keys are prefix + PK encoding.
+func indexKeyPrefix(schema *Schema, indexID int, row Row) ([]byte, error) {
+	if err := schema.Validate(); err != nil {
+		return nil, err
+	}
+	if indexID <= 0 || indexID >= len(schema.Indices) {
+		return nil, fmt.Errorf("relations: invalid index id %d", indexID)
+	}
+	key := indexPrefix(schema.Table, indexID)
+	for _, colIdx := range schema.Indices[indexID] {
+		if colIdx >= len(row) {
+			return nil, fmt.Errorf("relations: index col %d out of row length %d", colIdx, len(row))
+		}
+		key = row[colIdx].EncodeKey(key)
+	}
+	return key, nil
 }
 
 // Open opens or creates the database at path (directory for LSM). Schemas are loaded on demand via GetSchema.
@@ -110,17 +167,135 @@ func (db *DB) Select(schema *Schema, row Row) (ok bool, err error) {
 	return true, nil
 }
 
+// SelectByIndex returns all rows whose index columns match the values in row.
+// row must have the index column cells set; PK cells are filled from the index and then the full row is loaded.
+func (db *DB) SelectByIndex(schema *Schema, indexID int, row Row) ([]Row, error) {
+	prefix, err := indexKeyPrefix(schema, indexID, row)
+	if err != nil {
+		return nil, err
+	}
+	iter, err := db.store.Seek(prefix)
+	if err != nil {
+		return nil, err
+	}
+	var out []Row
+	for iter.Valid() {
+		k := iter.Key()
+		if !bytes.HasPrefix(k, prefix) {
+			break
+		}
+		suffix := k[len(prefix):]
+		pkRow := schema.NewRow()
+		if err := pkRow.DecodePKOnly(schema, suffix); err != nil {
+			break
+		}
+		ok, err := db.Select(schema, pkRow)
+		if err != nil {
+			return out, err
+		}
+		if ok {
+			out = append(out, pkRow)
+		}
+		if err := iter.Next(); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
+}
+
+// SelectAll returns all rows in the given schema by scanning the row-key namespace.
+// It ignores secondary-index keys (which live in a separate key prefix namespace).
+func (db *DB) SelectAll(schema *Schema) ([]Row, error) {
+	// Row key format: tableName + 0x00 + primary-key cells.
+	prefix := append([]byte(schema.Table), 0)
+	iter, err := db.store.Seek(prefix)
+	if err != nil {
+		return nil, err
+	}
+	var out []Row
+	for iter.Valid() {
+		k := iter.Key()
+		if !bytes.HasPrefix(k, prefix) {
+			break
+		}
+		r := schema.NewRow()
+		if err := r.DecodeKey(schema, k); err != nil {
+			return nil, err
+		}
+		if err := r.DecodeVal(schema, iter.Val()); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+		if err := iter.Next(); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
+}
+
 // Insert writes the row. It returns updated=true if the key was new or the value changed.
 func (db *DB) Insert(schema *Schema, row Row) (updated bool, err error) {
+	tx := db.store.NewTX()
+	defer tx.Abort()
+
 	key, err := row.EncodeKey(schema)
 	if err != nil {
 		return false, err
 	}
+
+	// If the row already exists, load the old version so we can maintain secondary index entries.
+	var oldRow Row
+	oldVal, exists, err := tx.Get(key)
+	if err != nil {
+		return false, err
+	}
+	if exists {
+		oldRow = schema.NewRow()
+		if err := oldRow.DecodeKey(schema, key); err != nil {
+			return false, err
+		}
+		if err := oldRow.DecodeVal(schema, oldVal); err != nil {
+			return false, err
+		}
+	}
+
 	val, err := row.EncodeVal(schema)
 	if err != nil {
 		return false, err
 	}
-	return db.store.Set(key, val)
+
+	updated, err = tx.Set(key, val)
+	if err != nil || !updated {
+		return updated, err
+	}
+
+	// Maintain secondary indexes (Indices[1:]) in the same transaction as the primary row.
+	// This avoids inconsistent state if the process crashes mid-update.
+	if exists {
+		for indexID := 1; indexID < len(schema.Indices); indexID++ {
+			oldIdxKey, err := indexEntryKey(schema, indexID, oldRow)
+			if err != nil {
+				return true, err
+			}
+			if _, err := tx.Del(oldIdxKey); err != nil {
+				return true, err
+			}
+		}
+	}
+	for indexID := 1; indexID < len(schema.Indices); indexID++ {
+		idxKey, err := indexEntryKey(schema, indexID, row)
+		if err != nil {
+			return true, err
+		}
+		if _, err := tx.Set(idxKey, nil); err != nil {
+			return true, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 // Update overwrites the row by primary key. Returns updated=true if the value changed.
@@ -130,9 +305,44 @@ func (db *DB) Update(schema *Schema, row Row) (updated bool, err error) {
 
 // Delete removes the row by primary key. Returns deleted=true if the key existed.
 func (db *DB) Delete(schema *Schema, row Row) (deleted bool, err error) {
+	tx := db.store.NewTX()
+	defer tx.Abort()
+
 	key, err := row.EncodeKey(schema)
 	if err != nil {
 		return false, err
 	}
-	return db.store.Del(key)
+
+	// Load existing row so we can remove secondary index entries.
+	oldVal, exists, err := tx.Get(key)
+	if err != nil || !exists {
+		return false, err
+	}
+	oldRow := schema.NewRow()
+	if err := oldRow.DecodeKey(schema, key); err != nil {
+		return false, err
+	}
+	if err := oldRow.DecodeVal(schema, oldVal); err != nil {
+		return false, err
+	}
+
+	for indexID := 1; indexID < len(schema.Indices); indexID++ {
+		idxKey, err := indexEntryKey(schema, indexID, oldRow)
+		if err != nil {
+			return false, err
+		}
+		if _, err := tx.Del(idxKey); err != nil {
+			return false, err
+		}
+	}
+
+	deleted, err = tx.Del(key)
+	if err != nil {
+		return deleted, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return true, err
+	}
+	return deleted, nil
 }

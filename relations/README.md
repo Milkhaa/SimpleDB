@@ -38,13 +38,13 @@ Key encoding (EncodeKey/DecodeKey) is order-preserving: I64 = XOR sign bit + big
 ### Schema and Column
 
 - **Column** — `Name` (string) and `Type` (CellType).
-- **Schema** — Defines a table: `Table` (name), `Cols` (columns in order), `PKey` (primary key column indices into `Cols`).
+- **Schema** — Defines a table: `Table` (name), `Cols` (columns in order), `Indices` (a list of indexes; `Indices[0]` is the primary key index, additional entries are secondary indexes).
 
 ### Row
 
 **Row** is `[]Cell`, one cell per column in schema order.
 
-- **EncodeKey(schema)** — Key bytes: `tableName + 0x00` then **order-preserving** encoded primary-key cells (Cell.EncodeKey) in **PKey** order.
+- **EncodeKey(schema)** — Key bytes: `tableName + 0x00` then **order-preserving** encoded primary-key cells (Cell.EncodeKey) in primary-key order (`schema.Indices[0]`).
 - **EncodeVal(schema)** — Value bytes: encoded non-primary-key columns (Cell.EncodeVal) in schema order.
 - **DecodeKey(schema, key)** — Fills the primary-key cells of the row from `key` (skips table name up to the null terminator). Other cells unchanged.
 - **DecodeVal(schema, val)** — Fills the non-primary-key cells from `val`.
@@ -76,11 +76,15 @@ The package includes a parser and executor for a small SQL-like language. Schema
 
 | Statement    | Form                                                                 |
 | ------------ | -------------------------------------------------------------------- |
-| CREATE TABLE | `create table name (col type, ... , primary key (pkey1, ...));` — `type` is `int64` or `string`. |
+| CREATE TABLE | `create table name (col type, ... , primary key (pkey1, ...)[, index (col1, ...)]...);` — `type` is `int64` or `string`. Optional `index (...)` clauses define secondary indexes. |
 | INSERT       | `insert into name values (val1, val2, ...);` — Values in column order. |
-| SELECT       | `select col1, col2 from name [where col=val and ...];` — WHERE must be equality on columns (primary key). |
+| SELECT       | `select col1, col2 from name [where col=val and ...];` — WHERE must be equality only. See below. |
 | UPDATE       | `update name set col=val, ... [where col=val and ...];`              |
 | DELETE       | `delete from name [where col=val and ...];`                         |
+
+**SELECT WHERE and index choice:** WHERE must specify equality on a set of columns that exactly matches either the full primary key or the full column list of one secondary index. Partial keys (e.g. only one column of a two-column PK) are not allowed. If WHERE matches the primary key, at most one row is returned; if it matches a secondary index, all rows with those index values are returned. Example: table `t (a, b, c)` with `primary key (a)`, `index (c)` — `where a = 'x'` uses the PK; `where c = '45'` uses the index on `c` and may return multiple rows.
+
+**UPDATE and DELETE** use the same WHERE rules: equality on full primary key or full index. When WHERE matches a secondary index, every matching row is updated or deleted; `ExecResult.Updated` is the number of rows affected. See `TestUpdateByIndex` and `TestDeleteByIndex` in `db_test.go`.
 
 **Values:** Integers (e.g. `-123`) or quoted strings: single or double quotes, with `\'` and `\"` escapes. Keywords (e.g. `select`, `create`) are case-insensitive; table and column names are case-sensitive. Range predicates (e.g. `col >= 'x'`) are **not** supported; only equality in WHERE.
 
@@ -108,7 +112,7 @@ r, _ := db.ExecStmt(stmt)
 
 ## Key and value layout
 
-- **Key:** `tableName` (no length prefix) + single null byte `0x00` + **order-preserving** encoded key columns (EncodeKey) in `schema.PKey` order. Table names must not contain the null byte.
+- **Key:** `tableName` (no length prefix) + single null byte `0x00` + **order-preserving** encoded key columns (EncodeKey) in primary-key order (`schema.Indices[0]`). Table names must not contain the null byte.
 - **Value:** Encoded value columns only (EncodeVal: non-PKey columns in schema order).
 
 **Key encoding (order-preserving for bytes.Compare):**
@@ -139,7 +143,7 @@ schema := &relations.Schema{
         {Name: "action", Type: relations.CellTypeStr},
         {Name: "data", Type: relations.CellTypeStr},
     },
-    PKey: []int{0, 1}, // (id, action)
+    Indices: [][]int{{0, 1}}, // primary key: (id, action)
 }
 
 row := relations.Row{

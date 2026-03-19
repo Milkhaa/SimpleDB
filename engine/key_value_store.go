@@ -1,8 +1,8 @@
 package engine
 
 import (
-	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -70,24 +70,63 @@ func (kv *KV) openAll() error {
 		return err
 	}
 
-	var rec record
+	// Replay: only apply operations from fully committed transactions.
+	// we read the entire WAL, track the last OpCommit boundary,
+	// then apply only entries up to that boundary and truncate the WAL tail.
+	if _, err := kv.log.file.Seek(0, 0); err != nil {
+		kv.log.close()
+		kv.meta.Close()
+		return err
+	}
+	var entries []record
+	committed := 0
+	var lastCommittedOffset int64
+	var readPos int64
 	for {
-		done, err := kv.log.read(&rec)
+		var rec record
+		n, commitSeen, err := kv.log.readRecord(&rec)
+		// Always advance readPos by bytes consumed, even on EOF, so we can
+		// safely truncate stale partial-record suffixes.
+		readPos += int64(n)
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
 			kv.log.close()
 			kv.meta.Close()
 			return err
 		}
-		if done {
-			break
-		}
-		if rec.deleted {
-			kv.mem.delOrTombstone(rec.key)
+		if commitSeen {
+			committed = len(entries)
+			lastCommittedOffset = readPos
 		} else {
-			kv.mem.set(rec.key, rec.val)
+			entries = append(entries, record{
+				key: append([]byte(nil), rec.key...),
+				val: append([]byte(nil), rec.val...),
+				op:  rec.op,
+			})
 		}
 	}
 
+	kv.mem.Clear()
+	for i := 0; i < committed; i++ {
+		r := &entries[i]
+		if r.op == OpDel {
+			kv.mem.delOrTombstone(r.key)
+		} else {
+			kv.mem.set(r.key, r.val)
+		}
+	}
+
+	kv.log.writer.committed = lastCommittedOffset
+	kv.log.writer.offset = kv.log.writer.committed
+	if readPos > kv.log.writer.committed {
+		if err := kv.log.file.Truncate(kv.log.writer.committed); err != nil {
+			kv.log.close()
+			kv.meta.Close()
+			return err
+		}
+	}
 	meta := kv.meta.Get()
 	for _, name := range meta.SSTableFiles {
 		fpath := filepath.Join(kv.dir, name)
@@ -137,49 +176,46 @@ func (kv *KV) Seek(key []byte) (SortedKVIter, error) {
 }
 
 // Get returns the value for key. ok is false if the key is missing or was deleted.
+// Implemented as a single-operation transaction that aborts without committing.
 func (kv *KV) Get(key []byte) (value []byte, ok bool, err error) {
-	iter, err := kv.Seek(key)
-	if err != nil {
-		return nil, false, err
-	}
-	ok = iter.Valid() && bytes.Equal(iter.Key(), key)
-	if ok {
-		value = iter.Val()
-	}
-	return value, ok, err
+
+	tx := kv.NewTX()
+	defer tx.Abort()
+	return tx.Get(key)
 }
 
 // Set writes key-value. It returns updated=true if the key was new or the value changed.
+// Implemented as a single-operation transaction; commits only when updated.
 func (kv *KV) Set(key, value []byte) (updated bool, err error) {
-	oldVal, exist, err := kv.Get(key)
+	tx := kv.NewTX()
+	updated, err = tx.Set(key, value)
 	if err != nil {
+		tx.Abort()
 		return false, err
 	}
-	updated = !exist || !bytes.Equal(oldVal, value)
-	if !updated {
-		return false, nil
-	}
-	if err := kv.log.append(&record{key: key, val: value, deleted: false}); err != nil {
+	if updated {
+		err = tx.Commit()
 		return true, err
 	}
-	kv.mem.Set(key, value)
-	if err := kv.Compact(); err != nil {
-		return true, err
-	}
-	return true, nil
+	tx.Abort()
+	return false, nil
 }
 
 // Del removes key. It returns updated=true if the key existed.
+// Implemented as a single-operation transaction; commits only when the key existed.
 func (kv *KV) Del(key []byte) (updated bool, err error) {
-	_, exist, err := kv.Get(key)
-	if err != nil || !exist {
+	tx := kv.NewTX()
+	updated, err = tx.Del(key)
+	if err != nil {
+		tx.Abort()
 		return false, err
 	}
-	if err := kv.log.append(&record{key: key, deleted: true}); err != nil {
+	if updated {
+		err = tx.Commit()
 		return true, err
 	}
-	kv.mem.Del(key)
-	return true, nil
+	tx.Abort()
+	return false, nil
 }
 
 // Compact flushes the MemTable if it exceeds logThreshold, then merges adjacent

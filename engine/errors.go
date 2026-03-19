@@ -10,3 +10,6 @@ var ErrCorruptSSTable = errors.New("engine: corrupt sstable")
 
 // ErrKeyOrValueTooLarge indicates a key or value length exceeds the maximum storable in the SSTable header (uint32).
 var ErrKeyOrValueTooLarge = errors.New("engine: key or value length exceeds maximum")
+
+// ErrTxClosed indicates a transaction was aborted/committed and is no longer usable.
+var ErrTxClosed = errors.New("engine: transaction is closed")

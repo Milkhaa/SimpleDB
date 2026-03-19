@@ -14,7 +14,7 @@ func TestRowEncode(t *testing.T) {
 			{Name: "kind", Type: CellTypeStr},
 			{Name: "payload", Type: CellTypeStr},
 		},
-		PKey: []int{0, 1}, // (ts, kind)
+		Indices: [][]int{{0, 1}}, // primary key: (ts, kind)
 	}
 
 	row := Row{
